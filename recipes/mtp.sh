@@ -1,32 +1,24 @@
 #!/bin/bash
-# MTP recipe: Qwen's own MTP head (3 drafts, probabilistic draft sampling),
-# tensor-parallel 2, prefix caching, int8 per-token-head KV cache, vision
-# enabled.
+# MTP recipe: Qwen's own MTP head (3 drafts, probabilistic), TP=2, prefix
+# caching, int8 per-token-head KV, vision enabled.
 #
-# The flags are the argument set the upstream launcher produced for
+# Flags are what the upstream launcher produced for
 #   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
-# with three deliberate deviations:
-#   1. the KV cache is int8 per-token-head on the Triton backend instead of
-#      fp8 on FlashInfer (same per-token width, ~2x the pool of bf16), and
-#   2. VLLM_SPEC_DECODE_ATTN=1 is exported. Upstream only enabled the split-KV
-#      verify kernel for bf16-KV and dflash2; here patches/spec-decode-int8-kv.patch
-#      teaches it to read the int8 cache, which is what makes the verify step
-#      (every decode step of a speculating request) fast enough to matter.
-#      Upstream never measured MTP with it -- validate acceptance on your
-#      workload before trusting it.
-#   3. cudagraph_mode is forced to PIECEWISE. vLLM 0.27.1's default
-#      (FULL_AND_PIECEWISE) has a documented corruption in the MTP path:
-#      with a prefix-cache hit, one templated prompt length in 128
-#      (length % 128 == k+1 == 4 here) stops the first verify token and
-#      returns "" or "#" -- or, on one measured geometry, fluent wrong
-#      text. Upstream forced PIECEWISE for MTP in its long-context config
-#      for exactly this reason ("for CORRECTNESS, not preference"); the
-#      measured cost at the lengths this recipe serves is none (8k: 93.5
-#      vs 87.8 tok/s, 16k-50k within noise).
+# with three deviations:
+#   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
+#      -- same per-token width, ~2x the pool of bf16.
+#   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
+#      only for bf16-KV and dflash2; patches/spec-decode-int8-kv.patch
+#      teaches it the int8 cache. Upstream never measured MTP with it, so
+#      validate draft acceptance on your workload.
+#   3. cudagraph_mode=PIECEWISE. The default (FULL_AND_PIECEWISE) has a
+#      documented MTP corruption: with a prefix-cache hit, one prompt length
+#      in 128 (here: length % 128 == 4) returns "" / "#" or fluent wrong
+#      text. Upstream forced PIECEWISE for MTP for correctness; at the
+#      served lengths it costs nothing measured.
 #
-# The exported env vars support the patch stack (split-KV verify attention,
-# vision-tower offload) and the flashinfer/torch-allocator interaction; the
-# vllm line below is the complete server configuration.
+# The env vars support the patch stack; the vllm line is the complete
+# server configuration.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
@@ -39,8 +31,7 @@ if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
 
-# a dead engine leaves its OffloadingConnector region in /dev/shm and the next
-# boot dies in shared_offload_region.py; with a restart policy that loops (#33)
+# a dead engine leaves its /dev/shm offload region and the next boot dies on it (upstream #33)
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
@@ -48,29 +39,21 @@ if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   done
 fi
 
-# split-KV verify attention reading the int8 cache (see the header)
+# split-KV verify attention reading the int8 cache (see header)
 export VLLM_SPEC_DECODE_ATTN=1
-# on by default (the original's VISION_OFFLOAD=1): the vision tower
-# (~0.88 GiB, sharded across both GPUs) stays in pinned host RAM and each
-# module is copied to the GPU for its own forward -- zero resident VRAM,
-# bit-exact output, ~+12% on vision forwards (measured on a PCIe 4.0 x16
-# 3090); =0 keeps the tower GPU-resident
-# (patches/vision-tower-cpu-offload.patch)
+# vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
+# off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
-# flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
+# torch sampler (flashinfer's needs nvcc to JIT)
 export VLLM_USE_FLASHINFER_SAMPLER=0
-# DeltaNet's transient workspace fragments the allocator; expandable segments
-# are what keep the boot from OOMing
+# keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-# no --language-model-only: the server takes image input; where the tower
-# lives is VLLM_VISION_CPU_OFFLOAD_GB above.
-# The two multimodal flags are the original repo's vision arguments: at most
-# one image per request, and a pixel cap below the processor default because
-# vLLM profiles the encoder at the largest image it accepts and that peak
-# comes out of the KV pool (2097152 px = 2048 image tokens).
-# --prefix-caching-hash-algo xxhash: 128-bit xxHash instead of the default
-# sha256 for prefix-cache block hashes (faster; needs the xxhash package).
+# no --language-model-only: the server takes image input.
+# Vision args are the original's: one image per request, and a pixel cap
+# (2097152 px = 2048 image tokens) since vLLM profiles the encoder at the
+# largest accepted image and that peak comes out of the KV pool.
+# xxhash: faster prefix-cache block hashes than the default sha256.
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \

@@ -2,10 +2,9 @@
 
 A fork of [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090),
 specialized to one machine shape: **two 24 GB GPUs (tensor-parallel 2)**,
-serving Qwen3.8-27B with vLLM 0.27.1 and its custom patch stack.
-Everything not needed for the two recipes below is removed; the recipes are
-plain bash files that call `vllm serve` with **explicit flags** — there are
-no CTX/SPEC-style env-var configurations left to construct.
+serving Qwen3.8-27B with vLLM 0.27.1 and its custom patch stack. Everything
+not needed for the two recipes below is removed; the recipes call `vllm
+serve` with explicit flags — no CTX/SPEC-style configuration to construct.
 
 | recipe | speculation | KV cache | the upstream config it matches |
 |---|---|---|---|
@@ -13,29 +12,18 @@ no CTX/SPEC-style env-var configurations left to construct.
 | [recipes/mtp.sh](recipes/mtp.sh) | Qwen's MTP head, 3 drafts, probabilistic | `int8_per_token_head`, prefix caching, native max len, 8 seqs | `SPEC=mtp CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2`, KV swapped fp8 → int8 |
 
 Both recipes take image input (no `--language-model-only`) with the
-original repo's vision arguments: at most one image per request
-(`--limit-mm-per-prompt`) and a pixel cap below the processor default
-(`--mm-processor-kwargs`) so the encoder's profiling peak
-(2097152 px = 2048 image tokens) stays small in the KV pool. The ~0.9 GB
-vision tower is offloaded to pinned host RAM by default
-(`VLLM_VISION_CPU_OFFLOAD_GB=1`) and is copied to the GPUs for each image
-forward — zero resident VRAM, bit-exact output, ~+12% on vision forwards
-(measured on a PCIe 4.0 x16 3090); `=0` keeps it GPU-resident (it fits,
-and saves the copy). They use
-`--enable-prefix-caching` with `--prefix-caching-hash-algo xxhash` (128-bit
-xxHash instead of the default sha256 for block hashing — faster, and the
-non-cryptographic collision caveat is moot on a single-user box; the
-`xxhash` package is in requirements.txt),
-`--gpu-memory-utilization 0.93` (the launcher's single-card KV pin does not
-apply under TP>1 — the pool is sized from utilization),
-`--mamba-ssm-cache-dtype float16` (halves the GDN recurrent-state cost),
-`--max-num-batched-tokens 4096` (the original's 2048 was a single-card
-value; two 24 GB cards have room for the bigger prefill peak), the qwen3
-reasoning parser, and `qwen3_coder` tool parsing. The mtp recipe additionally
-forces `cudagraph_mode=PIECEWISE` — see its header for the documented
-FULL-mode corruption that motivates it. They default to port 8080
-(`PORT=…`) and a `.venv` at the repo root (`MODEL`, `DRAFT` overridable the
-same way).
+original repo's vision arguments: one image per request, and a pixel cap
+(2097152 px = 2048 image tokens) so the encoder's profiling peak stays
+small in the KV pool. The ~0.9 GB vision tower is offloaded to pinned
+host RAM by default (`VLLM_VISION_CPU_OFFLOAD_GB=1`; `=0` keeps it
+GPU-resident). They also use `--enable-prefix-caching` with
+`--prefix-caching-hash-algo xxhash` (the `xxhash` package is in
+requirements.txt), `--gpu-memory-utilization 0.93` (under TP>1 the pool is
+sized from utilization), `--mamba-ssm-cache-dtype float16` (halves the GDN
+state cost), `--max-num-batched-tokens 4096`, the qwen3 reasoning parser,
+and qwen3_coder tool parsing. The mtp recipe additionally forces
+`cudagraph_mode=PIECEWISE` — see its header. Port 8080 (`PORT=…`) and a
+`.venv` at the repo root (`MODEL`, `DRAFT` overridable the same way).
 
 ## Layout
 
@@ -54,12 +42,9 @@ docker/             entrypoint.sh, prepare.sh
 ```bash
 docker build -t syv-recipes .
 
-# Reuse the host's existing Hugging Face cache so the container downloads
-# nothing you already have. The one-liner resolves to the same hub
-# directory the host's huggingface_hub uses, however it is configured:
-#   HF_HUB_CACHE=<dir>        → that dir
-#   HF_HOME=<root>            → <root>/hub
-#   (neither)                 → ~/.cache/huggingface/hub
+# optional but recommended: reuse the host's existing HF hub cache -- the
+# one-liner resolves to $HF_HUB_CACHE, or $HF_HOME/hub, or the default,
+# however the host configures it
 HUB="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
 docker run -d --name qwen --gpus all --ipc=host -p 8080:8080 \
   -v qwen-models:/app/models -v qwen-cache:/cache \
@@ -67,30 +52,21 @@ docker run -d --name qwen --gpus all --ipc=host -p 8080:8080 \
   --restart unless-stopped syv-recipes            # entrypoint default: dflash2
 ```
 
-The entrypoint prepares the models on first start (downloading through the
-mounted HF hub cache — seconds when it is warm — and the `qwen-cache`
-volume for everything else), then execs the recipe. `qwen-models` receives
-the assembled model dirs: hard-linked off the cache when both volumes
-share a filesystem (no extra space), a second ~21 GB copy when they don't.
-`syv-recipes mtp` runs the other one; `syv-recipes prepare` runs only the
-prep; `PREPARE=0` skips the prep when the models volume already holds
-them. Set `VLLM_API_KEY=…` as an env var to turn on key auth — optional;
-without it the server binds 0.0.0.0 and is open.
+The entrypoint prepares the models on first start (downloads through the
+mounted hub cache — seconds when it is warm; `qwen-cache` holds everything
+else), then execs the recipe. `qwen-models` receives the assembled dirs:
+hard-linked off the cache when both volumes share a filesystem, a second
+~21 GB copy when they don't. `syv-recipes mtp` runs the other one;
+`syv-recipes prepare` runs only the prep; `PREPARE=0` skips it.
+`VLLM_API_KEY=…` turns on key auth; without it the server binds 0.0.0.0
+and is open.
 
-The `-v "$HUB":…` line is optional but recommended. Two things about it:
-
-- **It is a run-time mount, and that is the only kind there is.** `docker
-  build` cannot see host directories — its only inputs are the build
-  context and BuildKit-internal caches — and the cache is consumed at
-  run time anyway, since the prep runs inside the container on first
-  start. The container side is pinned in the Dockerfile
-  (`HF_HOME=/cache/.cache/huggingface`), so no in-container env var needs
-  to match your host's.
-- **Caveats.** The container runs as root, so anything it *downloads* into
-  your host cache is root-owned (world-readable, but removing it later
-  needs sudo). On Docker Desktop (macOS/WSL2) the mount crosses the
-  virtiofs boundary, so the prep's hard-links fall back to a full ~21 GB
-  copy — it works, it just uses the space.
+The `-v "$HUB":…` mount is a run-time one (docker build cannot see host
+directories, and the cache is consumed at run time by the prep anyway);
+the container side is pinned in the Dockerfile. Caveats: the container
+runs as root, so files it downloads into your host cache are root-owned;
+on Docker Desktop the mount crosses virtiofs, so the prep's hard-links
+fall back to a full copy.
 
 ## Bare metal (uv)
 
@@ -110,12 +86,11 @@ bash recipes/dflash2.sh        # or recipes/mtp.sh
 
 The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
 `DRAFT` and `PORT` may be overridden with env vars of the same names.
-`VLLM_API_KEY=…` in the environment turns on key auth (optional).
 
 ## The kept patches (all written against vLLM 0.27.1)
 
 - `dflash2-backport.patch` — DFlash2 drafter (vLLM PR #52816) on 0.27.1, incl. the V2 model-runner speculator
-- `hybrid-kv-groups-v2-cudagraph.patch` — hybrid KV-group sizing for the drafter's sliding-window layers; explicit CUDA-graph memory accounting for the V2 runner (`VLLM_V2_CUDAGRAPH_MEM_MIB`)
+- `hybrid-kv-groups-v2-cudagraph.patch` — KV-group sizing for the drafter's sliding-window layers; explicit CUDA-graph memory accounting (`VLLM_V2_CUDAGRAPH_MEM_MIB`)
 - `hybrid-sw-block-promote.patch` — lets a quantized KV cache fit in a hybrid target+drafter (block-size promotion instead of page padding)
 - `int4-kv-per-token-head.patch` — boot blockers for int4 per-token-head KV with the drafter
 - `marlin-int8-layer-select.patch` — env-selectable int8-activation layers for the Marlin path
@@ -126,39 +101,34 @@ The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
 - `qwen3_5-mtp-draft-vocab.patch` — vocab-truncated MTP draft head (the fast model's 40k draft head)
 - `sampler-small-topk-fast-softmax.patch` — sort-free top-k/top-p, multi-block softmax, truncated drafts
 - `spec-decode-attn.patch` — split-KV verify attention (`VLLM_SPEC_DECODE_ATTN`)
-- `spec-decode-int8-kv.patch` — the split-KV kernel reads the int8 per-token-head cache (what both recipes run on)
+- `spec-decode-int8-kv.patch` — teaches the split-KV kernel to read the int8 per-token-head cache
 - `speed-knobs-envs.patch` — registers the speed knobs as env vars (torch.compile cache key)
-- `vision-tower-cpu-offload.patch` — vision tower in pinned host RAM (on by default in both recipes, `VLLM_VISION_CPU_OFFLOAD_GB=1`; `=0` keeps it GPU-resident)
+- `vision-tower-cpu-offload.patch` — vision tower in pinned host RAM (`VLLM_VISION_CPU_OFFLOAD_GB`)
 - `vllm-pr50021-gdn-spec-bounds.patch` — bounds on accepted-token state lookups in the GDN/Mamba spec kernels
 - `xgrammar-spec-terminated.patch` — structured output survives tokens accepted past the grammar's end
 
-Removed from the upstream stack: KVarN (4/2-bit KV cache), lookup-augmented
-drafting (the `DFLASH_TOKENS>7` lane), and n-gram chains — the DFlash2
-checkpoint proposes its trained 7 tokens, and the verify block stays 8.
+Removed from the upstream stack: KVarN (4/2-bit KV), lookup-augmented
+drafting, and n-gram chains — the DFlash2 checkpoint proposes its trained
+7 tokens, and the verify block stays 8.
 
 ## Notes
 
-- **int8 KV is a trade**: roughly double the pool of bf16, at the cost of the
-  Triton backend and a per-step int8 unpack, and its quality at depth was
-  never measured in the upstream repo (their measured int8 numbers cover the
-  batch-mode activations path, not this cache). Verify perplexity/GSM8K on
-  your workload before trusting it with real data.
-- **MTP + split-KV verify**: the mtp recipe runs a configuration upstream
-  never measured (int8-KV split-KV verify under MTP, see the recipe header);
-  check draft acceptance on your workload before trusting it.
-- **TP=2**: upstream measured +16–35% decode at C1 on a 1-vs-2×3090 A/B
-  (PCIe x8, no NVLink) and found DFlash2 wins at every concurrency on two
-  cards; keep the 7-draft block (the one 15-draft datapoint at TP=2 lost 27%).
-- **Chat template**: the prep step replaces the base checkpoint's stock
-  template with the Qwen-Sharp v22.4.0 template
-  (`peculiar-ragdoll/Qwen-Sharp-Chat-Templates`): token-efficient thinking
-  and tool calls. Per-request template variables — `enable_thinking`,
-  `reasoning_effort`, `tool_call_format`, … — go through
-  `chat_template_kwargs`.
-- First start compiles (torch.compile, CUDA graph capture) — the caches live
-  in `$HOME` (the `/cache` volume in Docker), so it happens once.
-- Sampling: Qwen recommends temperature 0.7 / top_p 0.8 for instruct and
-  1.0 / 0.95 with thinking (the default).
+- **int8 KV is a trade**: ~2x the pool of bf16, at the cost of the Triton
+  backend and a per-step unpack; its quality at depth was never measured
+  upstream. Verify perplexity/GSM8K on your workload before trusting it.
+- **MTP + split-KV verify**: a configuration upstream never measured (see
+  the mtp header); check draft acceptance on your workload.
+- **TP=2**: upstream measured +16–35% decode at C1 vs one 3090 (PCIe x8,
+  no NVLink); DFlash2 wins at every concurrency on two cards, and the
+  15-draft block lost 27% at TP=2 — keep 7.
+- **Chat template**: the prep replaces the stock template with Qwen-Sharp
+  v22.4.0 (token-efficient thinking and tool calls); per-request variables
+  — `enable_thinking`, `reasoning_effort`, `tool_call_format`, … — go
+  through `chat_template_kwargs`.
+- First start compiles (torch.compile, CUDA graphs); the caches live in
+  `$HOME` (the `/cache` volume in Docker), so it happens once.
+- Sampling: Qwen recommends 0.7 / top_p 0.8 for instruct, 1.0 / 0.95 with
+  thinking (the default).
 
 ## License
 

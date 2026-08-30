@@ -1,17 +1,14 @@
 #!/bin/bash
-# DFlash2 recipe: block drafter (7 drafts in one pass), tensor-parallel 2,
-# prefix caching, int8 per-token-head KV cache, vision enabled.
+# DFlash2 recipe: block drafter (7 drafts in one pass), TP=2, prefix caching,
+# int8 per-token-head KV, vision enabled.
 #
-# The flags are the exact argument set the upstream launcher produced for
-#   SPEC=dflash2 CTX=long PREFIX_CACHE=1 DFLASH_TOKENS=7 (default)
-#   EXTRA_ARGS="--tensor-parallel-size 2"
-# minus the single-card KV_MEM pin (the launcher drops it under TP>1 and
-# sizes the KV pool from gpu-memory-utilization instead).
+# Flags are exactly what the upstream launcher produced for
+#   SPEC=dflash2 CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
+# (DFLASH_TOKENS=7 is its default), minus the single-card KV_MEM pin -- under
+# TP>1 the launcher drops it and sizes the KV pool from gpu-memory-utilization.
 #
-# The exported env vars support the patch stack (split-KV verify attention,
-# V2-runner graph accounting, vision-tower offload) and the
-# flashinfer/torch-allocator interaction; the vllm line below is the
-# complete server configuration.
+# The env vars support the patch stack; the vllm line is the complete
+# server configuration.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
@@ -26,8 +23,7 @@ if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
 
-# a dead engine leaves its OffloadingConnector region in /dev/shm and the next
-# boot dies in shared_offload_region.py; with a restart policy that loops (#33)
+# a dead engine leaves its /dev/shm offload region and the next boot dies on it (upstream #33)
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
@@ -35,35 +31,27 @@ if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   done
 fi
 
-# split-KV verify attention (patches/spec-decode-attn.patch) reading the int8
-# cache (patches/spec-decode-int8-kv.patch); QMAX = the 8-token verify block
+# split-KV verify attention reading the int8 cache
+# (patches/spec-decode-attn.patch + spec-decode-int8-kv.patch); QMAX = the 8-token verify block
 export VLLM_SPEC_DECODE_ATTN=1
 export VLLM_SPEC_DECODE_ATTN_QMAX=8
-# the V2 runner (forced by dflash) does not count its ~1.4 GiB of CUDA graphs
-# against gpu-memory-utilization; reserve them explicitly
+# the V2 runner (forced by dflash) doesn't count its ~1.4 GiB of CUDA graphs
+# against gpu-memory-utilization, so they're reserved here
 # (patches/hybrid-kv-groups-v2-cudagraph.patch)
 export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
-# on by default (the original's VISION_OFFLOAD=1): the vision tower
-# (~0.88 GiB, sharded across both GPUs) stays in pinned host RAM and each
-# module is copied to the GPU for its own forward -- zero resident VRAM,
-# bit-exact output, ~+12% on vision forwards (measured on a PCIe 4.0 x16
-# 3090); =0 keeps the tower GPU-resident
-# (patches/vision-tower-cpu-offload.patch)
+# vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
+# off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
-# flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
+# torch sampler (flashinfer's needs nvcc to JIT)
 export VLLM_USE_FLASHINFER_SAMPLER=0
-# DeltaNet's transient workspace fragments the allocator; expandable segments
-# are what keep the boot from OOMing
+# keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-# no --language-model-only: the server takes image input; where the tower
-# lives is VLLM_VISION_CPU_OFFLOAD_GB above.
-# The two multimodal flags are the original repo's vision arguments: at most
-# one image per request, and a pixel cap below the processor default because
-# vLLM profiles the encoder at the largest image it accepts and that peak
-# comes out of the KV pool (2097152 px = 2048 image tokens).
-# --prefix-caching-hash-algo xxhash: 128-bit xxHash instead of the default
-# sha256 for prefix-cache block hashes (faster; needs the xxhash package).
+# no --language-model-only: the server takes image input.
+# Vision args are the original's: one image per request, and a pixel cap
+# (2097152 px = 2048 image tokens) since vLLM profiles the encoder at the
+# largest accepted image and that peak comes out of the KV pool.
+# xxhash: faster prefix-cache block hashes than the default sha256.
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \

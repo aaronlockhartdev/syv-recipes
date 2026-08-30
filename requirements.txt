@@ -1,7 +1,6 @@
-# Pinned to the reference install (vllm 0.27.1 -> torch 2.13.0 cu130,
-# triton 3.7.1, flashinfer-python 0.6.16.post3; the rest pinned to what the
-# reference venv resolved). huggingface_hub + hf_transfer are what the
-# prepare scripts use to download through HF's built-in cache.
+# Pinned to the reference install (vllm 0.27.1 pulls torch 2.13.0 cu130,
+# triton 3.7.1, flashinfer-python 0.6.16.post3 itself; huggingface_hub +
+# hf_transfer are what the prepare scripts use for downloads).
 vllm==0.27.1
 transformers==5.15.0
 tokenizers==0.22.2

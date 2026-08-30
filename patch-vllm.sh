@@ -1,12 +1,10 @@
 #!/bin/bash
-# Apply every patch in patches/ to the vLLM installed in the repo's venv.
+# Apply every patch in patches/ to the vLLM in the repo's venv
+# (override the default ./.venv with VENV=/path/to/venv).
 #
-#   bash patch-vllm.sh              (uses ./.venv)
-#   VENV=/path/to/venv bash patch-vllm.sh
-#
-# Same semantics as the Dockerfile: set -e + patch --batch (never prompts on a
-# non-interactive stdin) + a compileall gate, so a patch that fails or that
-# was already applied aborts the run instead of leaving a half-patched vLLM.
+# Same semantics as the Dockerfile: set -e + patch --batch (never prompts
+# on a dead stdin) + a compileall gate -- a failing or already-applied
+# patch aborts instead of leaving a half-patched vLLM.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
