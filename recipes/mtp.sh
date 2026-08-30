@@ -54,7 +54,7 @@ exec vllm serve "$MODEL" \
   --host 0.0.0.0 --port $PORT \
   --tensor-parallel-size 2 \
   --gpu-memory-utilization 0.93 \
-  --max-model-len 150000 \
+  --max-model-len auto \
   --max-num-seqs 8 \
   --api-server-count 1 \
   --attention-backend TRITON_ATTN \
