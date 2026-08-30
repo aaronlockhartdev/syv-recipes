@@ -1,9 +1,8 @@
 # build context = the repo, minus everything that is local state
 .git
-venv
+.venv
 models
 .env
-api_key.txt
 *.log
 __pycache__
 **/__pycache__

@@ -1,13 +1,12 @@
 #!/bin/bash
 # DFlash2 recipe: block drafter (7 drafts in one pass), tensor-parallel 2,
-# prefix caching, int8 per-token-head KV cache.
+# prefix caching, int8 per-token-head KV cache, vision enabled.
 #
 # The flags are the exact argument set the upstream launcher produced for
 #   SPEC=dflash2 CTX=long PREFIX_CACHE=1 DFLASH_TOKENS=7 (default)
 #   EXTRA_ARGS="--tensor-parallel-size 2"
 # minus the single-card KV_MEM pin (the launcher drops it under TP>1 and
-# sizes the KV pool from gpu-memory-utilization instead) and VLLM_DFLASH2_LOOKUP
-# (its patch, dflash2-lookup-drafting.patch, is not part of this stack).
+# sizes the KV pool from gpu-memory-utilization instead).
 #
 # The exported env vars support the patch stack (split-KV verify attention,
 # V2-runner graph accounting) and the flashinfer/torch-allocator interaction;
@@ -17,12 +16,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
 DRAFT=${DRAFT:-$REPO/models/Qwen3.8-27B-DFlash2-W4A16}
-PORT=${PORT:-18020}
-export PATH="$REPO/venv/bin:$PATH"
+PORT=${PORT:-8080}
+export PATH="$REPO/.venv/bin:$PATH"
 
 [ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
 [ -f "$DRAFT/config.json" ] || { echo "no drafter at $DRAFT -- run: python prepare/fetch_dflash2.py <dir>" >&2; exit 1; }
-if [ ! -x "$REPO/venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
+if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
 
@@ -46,20 +45,11 @@ export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
 # flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # DeltaNet's transient workspace fragments the allocator; expandable segments
-# are what keep the boot from OOMing. WSL2's paravirt driver rejects the VMM
-# calls (costs Marlin repack), and the V2 runner's UVA buffers need pinned
-# memory on there by default.
-if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
-  export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
-  export VLLM_WSL2_ENABLE_PIN_MEMORY=1
-else
-  export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-fi
+# are what keep the boot from OOMing
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-if [ -z "${VLLM_API_KEY:-}" ] && [ -f "$REPO/api_key.txt" ]; then
-  export VLLM_API_KEY="$(cat "$REPO/api_key.txt")"
-fi
-
+# no --language-model-only: on 2x24 GB the vision tower (~0.9 GB, sharded
+# across both GPUs) simply stays resident
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
@@ -68,7 +58,6 @@ exec vllm serve "$MODEL" \
   --max-model-len 131072 \
   --max-num-seqs 4 \
   --api-server-count 1 \
-  --language-model-only \
   --attention-backend TRITON_ATTN \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float16 \

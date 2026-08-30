@@ -7,7 +7,7 @@
 # Before serving, docker/prepare.sh runs (idempotent) unless PREPARE=0.
 set -e
 cd /app
-export PATH=/app/venv/bin:$PATH
+export PATH=/app/.venv/bin:$PATH
 cmd=${1:-dflash2}; shift || true
 case "$cmd" in
   dflash2|mtp)

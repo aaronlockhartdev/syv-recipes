@@ -1,7 +1,6 @@
-venv/
+.venv/
 models/
 .env
-api_key.txt
 qwen.log
 __pycache__/
 *.pyc

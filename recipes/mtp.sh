@@ -1,6 +1,7 @@
 #!/bin/bash
 # MTP recipe: Qwen's own MTP head (3 drafts, probabilistic draft sampling),
-# tensor-parallel 2, prefix caching, int8 per-token-head KV cache.
+# tensor-parallel 2, prefix caching, int8 per-token-head KV cache, vision
+# enabled.
 #
 # The flags are the argument set the upstream launcher produced for
 #   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
@@ -13,15 +14,19 @@
 #      (every decode step of a speculating request) fast enough to matter.
 #      Upstream never measured MTP with it -- validate acceptance on your
 #      workload before trusting it.
+#
+# The exported env vars support the patch stack (split-KV verify attention)
+# and the flashinfer/torch-allocator interaction; the vllm line below is the
+# complete server configuration.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
-PORT=${PORT:-18020}
-export PATH="$REPO/venv/bin:$PATH"
+PORT=${PORT:-8080}
+export PATH="$REPO/.venv/bin:$PATH"
 
 [ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
-if [ ! -x "$REPO/venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
+if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
 
@@ -39,18 +44,11 @@ export VLLM_SPEC_DECODE_ATTN=1
 # flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # DeltaNet's transient workspace fragments the allocator; expandable segments
-# are what keep the boot from OOMing (off on WSL2, where the paravirt driver
-# rejects the VMM calls)
-if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
-  export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
-else
-  export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-fi
+# are what keep the boot from OOMing
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-if [ -z "${VLLM_API_KEY:-}" ] && [ -f "$REPO/api_key.txt" ]; then
-  export VLLM_API_KEY="$(cat "$REPO/api_key.txt")"
-fi
-
+# no --language-model-only: on 2x24 GB the vision tower (~0.9 GB, sharded
+# across both GPUs) simply stays resident
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
@@ -59,7 +57,6 @@ exec vllm serve "$MODEL" \
   --max-model-len 150000 \
   --max-num-seqs 8 \
   --api-server-count 1 \
-  --language-model-only \
   --attention-backend TRITON_ATTN \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float16 \

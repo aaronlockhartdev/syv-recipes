@@ -12,11 +12,15 @@ no CTX/SPEC-style env-var configurations left to construct.
 | [recipes/dflash2.sh](recipes/dflash2.sh) | DFlash2 block drafter, 7 drafts in one pass | `int8_per_token_head`, prefix caching, 131 072 max len, 4 seqs | `SPEC=dflash2 CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2` |
 | [recipes/mtp.sh](recipes/mtp.sh) | Qwen's MTP head, 3 drafts, probabilistic | `int8_per_token_head`, prefix caching, 150 000 max len, 8 seqs | `SPEC=mtp CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2`, KV swapped fp8 → int8 |
 
-Both recipes use `--gpu-memory-utilization 0.93` (the launcher's single-card
-KV pin does not apply under TP>1 — the pool is sized from utilization),
-`--mamba-ssm-cache-dtype float16` (halves the GDN recurrent-state cost),
-`--language-model-only`, `--max-num-batched-tokens 2048`, the qwen3 reasoning
-parser, and `qwen3_coder` tool parsing.
+Both recipes enable the vision tower (no `--language-model-only` — on two 24 GB
+cards the ~0.9 GB of vision weights are just resident, unlike the single-GPU
+case where it had to be CPU-offloaded) and use `--gpu-memory-utilization 0.93`
+(the launcher's single-card KV pin does not apply under TP>1 — the pool is
+sized from utilization), `--mamba-ssm-cache-dtype float16` (halves the GDN
+recurrent-state cost), `--max-num-batched-tokens 2048`, the qwen3 reasoning
+parser, and `qwen3_coder` tool parsing. They default to port 8080
+(`PORT=…`) and a `.venv` at the repo root (`MODEL`, `DRAFT` overridable the
+same way).
 
 ## Layout
 
@@ -33,7 +37,7 @@ docker/             entrypoint.sh, prepare.sh
 
 ```bash
 docker build -t syv-recipes .
-docker run -d --name qwen --gpus all --ipc=host -p 18020:18020 \
+docker run -d --name qwen --gpus all --ipc=host -p 8080:8080 \
   -v qwen-models:/app/models -v qwen-cache:/cache \
   --restart unless-stopped syv-recipes            # entrypoint default: dflash2
 ```
@@ -44,29 +48,29 @@ recipe. `qwen-models` receives the assembled model dirs: hard-linked off the
 cache when both volumes share a filesystem (no extra space), a second
 ~21 GB copy when they don't. `syv-recipes mtp` runs the other one;
 `syv-recipes prepare` runs only the prep; `PREPARE=0` skips the prep when the
-models volume already holds them. `VLLM_API_KEY=...` as an env var (or
-`api_key.txt` in the repo root) turns on key auth — the server binds 0.0.0.0
-and is open without a key.
+models volume already holds them. Set `VLLM_API_KEY=…` as an env var to turn
+on key auth — optional; without it the server binds 0.0.0.0 and is open.
 
 ## Bare metal (uv)
 
 ```bash
 # once, if uv is not installed yet (and install patch if your distro lacks it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv venv venv --python 3.12
-uv pip install --python venv/bin/python -r requirements.txt
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -r requirements.txt
 
 # the 17 patches, against the installed vllm
-SP=$(venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))')
+SP=$(.venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))')
 for p in patches/*.patch; do patch -p1 -d "$SP" < "$p"; done
 
-venv/bin/python prepare/build_fast_model.py models/Qwen3.8-27B-W4A16-AutoRound-fast
-venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
+.venv/bin/python prepare/build_fast_model.py models/Qwen3.8-27B-W4A16-AutoRound-fast
+.venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 bash recipes/dflash2.sh        # or recipes/mtp.sh
 ```
 
-The recipes put `./venv/bin` on PATH; `MODEL`, `DRAFT` and `PORT` may be
-overridden with env vars of the same names.
+The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
+`DRAFT` and `PORT` may be overridden with env vars of the same names.
+`VLLM_API_KEY=…` in the environment turns on key auth (optional).
 
 ## The kept patches (all written against vLLM 0.27.1)
 
@@ -84,7 +88,7 @@ overridden with env vars of the same names.
 - `spec-decode-attn.patch` — split-KV verify attention (`VLLM_SPEC_DECODE_ATTN`)
 - `spec-decode-int8-kv.patch` — the split-KV kernel reads the int8 per-token-head cache (what both recipes run on)
 - `speed-knobs-envs.patch` — registers the speed knobs as env vars (torch.compile cache key)
-- `vision-tower-cpu-offload.patch` — vision-tower host offload (dormant: both recipes run `--language-model-only`)
+- `vision-tower-cpu-offload.patch` — vision-tower host offload (unused here: the tower stays GPU-resident at 2×24 GB)
 - `vllm-pr50021-gdn-spec-bounds.patch` — bounds on accepted-token state lookups in the GDN/Mamba spec kernels
 - `xgrammar-spec-terminated.patch` — structured output survives tokens accepted past the grammar's end
 
@@ -94,9 +98,6 @@ checkpoint proposes its trained 7 tokens, and the verify block stays 8.
 
 ## Notes
 
-- **WSL2**: the dflash2 recipe needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1` and
-  `expandable_segments:False` — both handled automatically when it detects
-  WSL2. MTP runs as-is.
 - **int8 KV is a trade**: roughly double the pool of bf16, at the cost of the
   Triton backend and a per-step int8 unpack, and its quality at depth was
   never measured in the upstream repo (their measured int8 numbers cover the

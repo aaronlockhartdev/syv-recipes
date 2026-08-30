@@ -25,8 +25,8 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 COPY requirements.txt .
-RUN uv venv venv --python /usr/bin/python3.12 \
-    && uv pip install --python venv/bin/python -r requirements.txt
+RUN uv venv .venv --python /usr/bin/python3.12 \
+    && uv pip install --python .venv/bin/python -r requirements.txt
 
 # every patch, against the pinned vLLM. set -e makes a hunk that no longer
 # applies fail the build (patch runs with --batch so it never prompts on a
@@ -35,9 +35,9 @@ RUN uv venv venv --python /usr/bin/python3.12 \
 # it is gone now, so the build has to be the gate.
 COPY patches/ patches/
 RUN set -e; \
-    SP=$(venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))'); \
+    SP=$(.venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))'); \
     for p in patches/*.patch; do echo "== $p"; patch -p1 -d "$SP" --batch < "$p"; done; \
-    venv/bin/python -m compileall -q "$SP"
+    .venv/bin/python -m compileall -q "$SP"
 
 COPY docker/ docker/
 COPY prepare/ prepare/
@@ -48,5 +48,5 @@ COPY recipes/ recipes/
 RUN mkdir -p /cache /app/models && chmod 1777 /cache
 ENV HOME=/cache VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 HF_HUB_ENABLE_HF_TRANSFER=1
 VOLUME ["/cache", "/app/models"]
-EXPOSE 18020
+EXPOSE 8080
 ENTRYPOINT ["bash", "docker/entrypoint.sh"]
