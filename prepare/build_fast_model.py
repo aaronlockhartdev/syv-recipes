@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Build the modified Qwen3.8-27B "fast" model into a destination directory.
 
-Assembled on the CPU from two Hub repos, both fetched through Hugging Face's
-built-in cache (so re-runs never re-download):
+Assembled on the CPU from two Hub repos, fetched through Hugging Face's
+built-in cache (so re-runs never re-download), plus one file from a third:
 
   dbirks/Qwen3.8-27B-W4A16-AutoRound
       the W4A16 AutoRound checkpoint: hard-linked in (shards 1-5, tokenizer, ...)
   syvai/qwen3.8-27b-3090-fast-variant
       the overlay: int4-GPTQ lm_head (shard 7), int4 MTP module + 40k draft
       head (model_extra_tensors.safetensors), the draft-vocab ids, config, index
+  peculiar-ragdoll/Qwen-Sharp-Chat-Templates
+      one file: chat_template.jinja (Qwen-Sharp v22.4.0) replaces the base
+      checkpoint's stock template (token-efficient thinking and tool calls)
 
 The one local step: embed_tokens (~1.3 GB bf16) is requantized to int8
 group-128 symmetric in shard 6, the layout CompressedTensorsEmbeddingWNA16Int
@@ -30,12 +33,14 @@ import sys
 
 import torch
 from compressed_tensors.compressors.pack_quantized.base import pack_to_int32
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 BASE_REPO = "dbirks/Qwen3.8-27B-W4A16-AutoRound"
 FAST_REPO = "syvai/qwen3.8-27b-3090-fast-variant"
+TEMPLATE_REPO = "peculiar-ragdoll/Qwen-Sharp-Chat-Templates"
+TEMPLATE_FILE = "chat_template.jinja"
 
 # files from the fast-variant repo that replace/extend the base dir
 OVERLAY = (
@@ -86,6 +91,21 @@ def _snapshot(repo):
         return snapshot_download(repo)
 
 
+def _template_path():
+    # local-first like _snapshot; None when it cannot be fetched (offline,
+    # cold cache) -- the build then keeps whatever chat template the base
+    # checkpoint shipped
+    try:
+        return hf_hub_download(TEMPLATE_REPO, TEMPLATE_FILE, local_files_only=True)
+    except Exception:
+        pass
+    try:
+        return hf_hub_download(TEMPLATE_REPO, TEMPLATE_FILE)
+    except Exception as e:
+        print(f"  (Qwen-Sharp template unavailable: {e}; keeping the base chat template)")
+        return None
+
+
 def requant_embed(path, key):
     """In-place int8 group-128 symmetric requantization of one embedding."""
     tensors = {}
@@ -116,6 +136,14 @@ def requant_embed(path, key):
 
 def file_ready(dst_path, src_path):
     return os.path.isfile(dst_path) and os.path.getsize(dst_path) == os.path.getsize(src_path)
+
+
+def template_ready(dst, tsrc):
+    """True when DEST_DIR already holds the current Qwen-Sharp template."""
+    dst_t = os.path.join(dst, TEMPLATE_FILE)
+    if tsrc is None:
+        return os.path.isfile(dst_t)  # fetch failed: any template is fine
+    return file_ready(dst_t, tsrc)
 
 
 def install(dst_path, src_path, linkable):
@@ -174,8 +202,9 @@ def main():
     base = _snapshot(BASE_REPO)
     print(f"== HF cache: {FAST_REPO}")
     fast = _snapshot(FAST_REPO)
+    tsrc = _template_path()
 
-    if complete(dst, fast):
+    if complete(dst, fast) and template_ready(dst, tsrc):
         print("fast model already complete:", dst)
         return
 
@@ -211,6 +240,12 @@ def main():
             continue
         print(f"== {f}: fast-variant overlay")
         install(dstp, src, linkable=True)
+
+    if tsrc is not None:
+        dst_t = os.path.join(dst, TEMPLATE_FILE)
+        if not file_ready(dst_t, tsrc):
+            print(f"== {TEMPLATE_FILE}: Qwen-Sharp template ({TEMPLATE_REPO})")
+            install(dst_t, os.path.realpath(tsrc), linkable=False)
 
     assert complete(dst, fast), "assembly finished but the completeness check still fails"
     print("fast model ready:", dst)

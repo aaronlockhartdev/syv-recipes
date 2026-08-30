@@ -11,9 +11,12 @@ python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 
 - **build_fast_model.py** — the modified Qwen3.8-27B "fast" model
   (~19.5 GB): the W4A16 AutoRound checkpoint, with embed_tokens requantized
-  to int8 in place (the one local step, in shard 6) and the prebuilt
-  int4-GPTQ lm_head / MTP module / 40k draft head overlaid from
-  `syvai/qwen3.8-27b-3090-fast-variant`. Idempotent, resumable, ~8 GB peak RAM.
+  to int8 in place (the one local step, in shard 6), the prebuilt int4-GPTQ
+  lm_head / MTP module / 40k draft head overlaid from
+  `syvai/qwen3.8-27b-3090-fast-variant`, and the chat template replaced with
+  the Qwen-Sharp v22.4.0 template (`peculiar-ragdoll/Qwen-Sharp-Chat-Templates`
+  `chat_template.jinja`, one file) — token-efficient thinking and tool calls.
+  Idempotent, resumable, ~8 GB peak RAM.
 - **fetch_dflash2.py** — the W4A16 DFlash2 block drafter (~1.2 GB) for the
   dflash2 recipe.
 

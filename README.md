@@ -12,15 +12,17 @@ no CTX/SPEC-style env-var configurations left to construct.
 | [recipes/dflash2.sh](recipes/dflash2.sh) | DFlash2 block drafter, 7 drafts in one pass | `int8_per_token_head`, prefix caching, 131 072 max len, 4 seqs | `SPEC=dflash2 CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2` |
 | [recipes/mtp.sh](recipes/mtp.sh) | Qwen's MTP head, 3 drafts, probabilistic | `int8_per_token_head`, prefix caching, 150 000 max len, 8 seqs | `SPEC=mtp CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2`, KV swapped fp8 → int8 |
 
-Both recipes enable the vision tower (no `--language-model-only` — on two 24 GB
-cards the ~0.9 GB of vision weights are just resident, unlike the single-GPU
-case where it had to be CPU-offloaded) and use `--gpu-memory-utilization 0.93`
-(the launcher's single-card KV pin does not apply under TP>1 — the pool is
-sized from utilization), `--mamba-ssm-cache-dtype float16` (halves the GDN
-recurrent-state cost), `--max-num-batched-tokens 2048`, the qwen3 reasoning
-parser, and `qwen3_coder` tool parsing. They default to port 8080
-(`PORT=…`) and a `.venv` at the repo root (`MODEL`, `DRAFT` overridable the
-same way).
+Both recipes take image input (no `--language-model-only`): the ~0.9 GB
+vision tower lives in pinned host RAM by default
+(`VLLM_VISION_CPU_OFFLOAD_GB=1`) and is copied to the GPUs for each image
+forward — zero resident VRAM, bit-exact output, ~+12% on vision forwards;
+`=0` keeps it GPU-resident (it fits, and saves the copy). They use
+`--gpu-memory-utilization 0.93` (the launcher's single-card KV pin does not
+apply under TP>1 — the pool is sized from utilization),
+`--mamba-ssm-cache-dtype float16` (halves the GDN recurrent-state cost),
+`--max-num-batched-tokens 2048`, the qwen3 reasoning parser, and `qwen3_coder`
+tool parsing. They default to port 8080 (`PORT=…`) and a `.venv` at the repo
+root (`MODEL`, `DRAFT` overridable the same way).
 
 ## Layout
 
@@ -88,7 +90,7 @@ The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
 - `spec-decode-attn.patch` — split-KV verify attention (`VLLM_SPEC_DECODE_ATTN`)
 - `spec-decode-int8-kv.patch` — the split-KV kernel reads the int8 per-token-head cache (what both recipes run on)
 - `speed-knobs-envs.patch` — registers the speed knobs as env vars (torch.compile cache key)
-- `vision-tower-cpu-offload.patch` — vision-tower host offload (unused here: the tower stays GPU-resident at 2×24 GB)
+- `vision-tower-cpu-offload.patch` — vision tower in pinned host RAM (on by default in both recipes, `VLLM_VISION_CPU_OFFLOAD_GB=1`; `=0` keeps it GPU-resident)
 - `vllm-pr50021-gdn-spec-bounds.patch` — bounds on accepted-token state lookups in the GDN/Mamba spec kernels
 - `xgrammar-spec-terminated.patch` — structured output survives tokens accepted past the grammar's end
 
@@ -109,11 +111,16 @@ checkpoint proposes its trained 7 tokens, and the verify block stays 8.
 - **TP=2**: upstream measured +16–35% decode at C1 on a 1-vs-2×3090 A/B
   (PCIe x8, no NVLink) and found DFlash2 wins at every concurrency on two
   cards; keep the 7-draft block (the one 15-draft datapoint at TP=2 lost 27%).
+- **Chat template**: the prep step replaces the base checkpoint's stock
+  template with the Qwen-Sharp v22.4.0 template
+  (`peculiar-ragdoll/Qwen-Sharp-Chat-Templates`): token-efficient thinking
+  and tool calls. Per-request template variables — `enable_thinking`,
+  `reasoning_effort`, `tool_call_format`, … — go through
+  `chat_template_kwargs`.
 - First start compiles (torch.compile, CUDA graph capture) — the caches live
   in `$HOME` (the `/cache` volume in Docker), so it happens once.
 - Sampling: Qwen recommends temperature 0.7 / top_p 0.8 for instruct and
-  1.0 / 0.95 with thinking (the default). Thinking on/off is per-request via
-  `chat_template_kwargs: {"enable_thinking": ...}`.
+  1.0 / 0.95 with thinking (the default).
 
 ## License
 

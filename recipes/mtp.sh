@@ -15,9 +15,9 @@
 #      Upstream never measured MTP with it -- validate acceptance on your
 #      workload before trusting it.
 #
-# The exported env vars support the patch stack (split-KV verify attention)
-# and the flashinfer/torch-allocator interaction; the vllm line below is the
-# complete server configuration.
+# The exported env vars support the patch stack (split-KV verify attention,
+# vision-tower offload) and the flashinfer/torch-allocator interaction; the
+# vllm line below is the complete server configuration.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
@@ -41,14 +41,19 @@ fi
 
 # split-KV verify attention reading the int8 cache (see the header)
 export VLLM_SPEC_DECODE_ATTN=1
+# the vision tower (~0.88 GiB, sharded across both GPUs) lives in pinned host
+# RAM and is copied over per image forward: zero resident VRAM, bit-exact,
+# ~+12% on vision forwards (measured on a PCIe 4.0 x16 3090); =0 keeps it
+# GPU-resident (patches/vision-tower-cpu-offload.patch)
+export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
 # flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # DeltaNet's transient workspace fragments the allocator; expandable segments
 # are what keep the boot from OOMing
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-# no --language-model-only: on 2x24 GB the vision tower (~0.9 GB, sharded
-# across both GPUs) simply stays resident
+# no --language-model-only: the server takes image input; where the tower
+# lives is VLLM_VISION_CPU_OFFLOAD_GB above
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
