@@ -17,6 +17,10 @@ vision tower stays GPU-resident by default; `VLLM_VISION_CPU_OFFLOAD_GB=1`
 moves it to pinned host RAM instead — zero resident VRAM, bit-exact
 output, ~+12% on vision forwards (measured on a PCIe 4.0 x16 3090). They
 use
+`--enable-prefix-caching` with `--prefix-caching-hash-algo xxhash` (128-bit
+xxHash instead of the default sha256 for block hashing — faster, and the
+non-cryptographic collision caveat is moot on a single-user box; the
+`xxhash` package is in requirements.txt),
 `--gpu-memory-utilization 0.93` (the launcher's single-card KV pin does not
 apply under TP>1 — the pool is sized from utilization),
 `--mamba-ssm-cache-dtype float16` (halves the GDN recurrent-state cost),

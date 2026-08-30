@@ -56,7 +56,9 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
 # no --language-model-only: the server takes image input; where the tower
-# lives is VLLM_VISION_CPU_OFFLOAD_GB above
+# lives is VLLM_VISION_CPU_OFFLOAD_GB above.
+# --prefix-caching-hash-algo xxhash: 128-bit xxHash instead of the default
+# sha256 for prefix-cache block hashes (faster; needs the xxhash package).
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
@@ -71,6 +73,7 @@ exec vllm serve "$MODEL" \
   --async-scheduling \
   --max-num-batched-tokens 2048 \
   --enable-prefix-caching \
+  --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
   --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
   --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
