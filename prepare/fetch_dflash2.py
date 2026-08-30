@@ -1,20 +1,56 @@
-"""Fetch the DFlash2 drafter for single-user mode (SPEC=dflash2 in single-user/start_qwen.sh):
-the W4A16-GPTQ requantization of incoai/Qwen3.8-27B-DFlash2 built by drafter/capture_dflash2.py
-+ drafter/quant_dflash2.py (1.2 GB instead of 3.85 GB bf16; see drafter/README.md), prebuilt on
-the Hub.
+#!/usr/bin/env python3
+"""Fetch the W4A16 DFlash2 block drafter into a destination directory.
 
-  venv/bin/python prepare/fetch_dflash2.py [dst_dir]         # default models/Qwen3.8-27B-DFlash2-W4A16
-  venv/bin/python prepare/fetch_dflash2.py --bf16 [dst_dir]  # the original bf16 drafter instead (incoai)
+The int4-GPTQ requantization of incoai/Qwen3.8-27B-DFlash2 (1.2 GB vs the
+3.85 GB bf16 original), prebuilt on the Hub. Downloaded through Hugging
+Face's built-in cache, then linked into the destination dir.
+
+Usage:  python prepare/fetch_dflash2.py DEST_DIR
+
+Idempotent.
 """
-import os, sys
+
+import os
+import shutil
+import sys
+
 from huggingface_hub import snapshot_download
 
-HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
-BF16 = "--bf16" in sys.argv
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
-REPO = "incoai/Qwen3.8-27B-DFlash2" if BF16 else "syvai/Qwen3.8-27B-DFlash2-W4A16"
-D = args[0] if args else os.path.join(ROOT, "models", "Qwen3.8-27B-DFlash2" + ("" if BF16 else "-W4A16"))
-os.makedirs(D, exist_ok=True)
-snapshot_download(REPO, local_dir=D, allow_patterns=["*.json", "*.safetensors", "README.md"])
-print("drafter ready:", D)
-print("serve with: SPEC=dflash2 bash single-user/start_qwen.sh")
+REPO = "syvai/Qwen3.8-27B-DFlash2-W4A16"
+FILES = ("config.json", "model.safetensors")
+
+
+def _snapshot(repo):
+    # local-first: a warm cache resolves without any network (a blackholed
+    # network must not stall a model-ready boot); the first run downloads
+    try:
+        return snapshot_download(repo, local_files_only=True)
+    except Exception:
+        return snapshot_download(repo)
+
+
+def main():
+    if len(sys.argv) != 2 or not sys.argv[1].strip():
+        sys.exit("usage: python prepare/fetch_dflash2.py DEST_DIR")
+    dst = os.path.abspath(sys.argv[1])
+    os.makedirs(dst, exist_ok=True)
+
+    hub = _snapshot(REPO)
+    for f in FILES:
+        src = os.path.realpath(os.path.join(hub, f))
+        dstp = os.path.join(dst, f)
+        if os.path.isfile(dstp) and os.path.getsize(dstp) == os.path.getsize(src):
+            continue
+        if os.path.lexists(dstp):
+            os.remove(dstp)
+        try:
+            os.link(src, dstp)  # hard-link where possible; copy across devices
+        except OSError:
+            shutil.copy(src, dstp)
+        print(f"== {f}: {dstp}")
+    print("DFlash2 drafter ready:", dst)
+    print("serve with: recipes/dflash2.sh (this dir as DRAFT)")
+
+
+if __name__ == "__main__":
+    main()

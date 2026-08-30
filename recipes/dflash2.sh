@@ -1,0 +1,82 @@
+#!/bin/bash
+# DFlash2 recipe: block drafter (7 drafts in one pass), tensor-parallel 2,
+# prefix caching, int8 per-token-head KV cache.
+#
+# The flags are the exact argument set the upstream launcher produced for
+#   SPEC=dflash2 CTX=long PREFIX_CACHE=1 DFLASH_TOKENS=7 (default)
+#   EXTRA_ARGS="--tensor-parallel-size 2"
+# minus the single-card KV_MEM pin (the launcher drops it under TP>1 and
+# sizes the KV pool from gpu-memory-utilization instead) and VLLM_DFLASH2_LOOKUP
+# (its patch, dflash2-lookup-drafting.patch, is not part of this stack).
+#
+# The exported env vars support the patch stack (split-KV verify attention,
+# V2-runner graph accounting) and the flashinfer/torch-allocator interaction;
+# the vllm line below is the complete server configuration.
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(dirname "$DIR")"
+MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
+DRAFT=${DRAFT:-$REPO/models/Qwen3.8-27B-DFlash2-W4A16}
+PORT=${PORT:-18020}
+export PATH="$REPO/venv/bin:$PATH"
+
+[ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
+[ -f "$DRAFT/config.json" ] || { echo "no drafter at $DRAFT -- run: python prepare/fetch_dflash2.py <dir>" >&2; exit 1; }
+if [ ! -x "$REPO/venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
+  echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
+fi
+
+# a dead engine leaves its OffloadingConnector region in /dev/shm and the next
+# boot dies in shared_offload_region.py; with a restart policy that loops (#33)
+if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
+  for f in /dev/shm/vllm_offload_*.mmap; do
+    [ -e "$f" ] || continue
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[dflash2] removing stale offload region $f"; rm -f "$f"; }
+  done
+fi
+
+# split-KV verify attention (patches/spec-decode-attn.patch) reading the int8
+# cache (patches/spec-decode-int8-kv.patch); QMAX = the 8-token verify block
+export VLLM_SPEC_DECODE_ATTN=1
+export VLLM_SPEC_DECODE_ATTN_QMAX=8
+# the V2 runner (forced by dflash) does not count its ~1.4 GiB of CUDA graphs
+# against gpu-memory-utilization; reserve them explicitly
+# (patches/hybrid-kv-groups-v2-cudagraph.patch)
+export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
+# flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
+export VLLM_USE_FLASHINFER_SAMPLER=0
+# DeltaNet's transient workspace fragments the allocator; expandable segments
+# are what keep the boot from OOMing. WSL2's paravirt driver rejects the VMM
+# calls (costs Marlin repack), and the V2 runner's UVA buffers need pinned
+# memory on there by default.
+if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+  export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
+  export VLLM_WSL2_ENABLE_PIN_MEMORY=1
+else
+  export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+fi
+
+if [ -z "${VLLM_API_KEY:-}" ] && [ -f "$REPO/api_key.txt" ]; then
+  export VLLM_API_KEY="$(cat "$REPO/api_key.txt")"
+fi
+
+exec vllm serve "$MODEL" \
+  --served-model-name qwen3.8-27b \
+  --host 0.0.0.0 --port $PORT \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.93 \
+  --max-model-len 131072 \
+  --max-num-seqs 4 \
+  --api-server-count 1 \
+  --language-model-only \
+  --attention-backend TRITON_ATTN \
+  --kv-cache-dtype int8_per_token_head \
+  --mamba-ssm-cache-dtype float16 \
+  --async-scheduling \
+  --max-num-batched-tokens 2048 \
+  --enable-prefix-caching \
+  --mamba-cache-mode align \
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
+  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --reasoning-parser qwen3 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder

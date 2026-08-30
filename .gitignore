@@ -1,11 +1,7 @@
-__pycache__/
-api_key.txt
-bench/quality-data/
-bench/results/
-models/
-profiles/
-qwen.log
 venv/
-drafter/data/
-drafter/runs/
+models/
 .env
+api_key.txt
+qwen.log
+__pycache__/
+*.pyc
