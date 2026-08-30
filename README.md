@@ -27,6 +27,7 @@ same way).
 ```
 Dockerfile          uv + pinned vLLM 0.27.1 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
+patch-vllm.sh       applies patches/ to the installed vllm (bare metal)
 recipes/            dflash2.sh, mtp.sh — the two ways to serve
 prepare/            build_fast_model.py, fetch_dflash2.py — one-time model prep
 patches/            the 17 kept vLLM patches (below)
@@ -59,9 +60,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements.txt
 
-# the 17 patches, against the installed vllm
-SP=$(.venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))')
-for p in patches/*.patch; do patch -p1 -d "$SP" < "$p"; done
+# the 17 patches, against the installed vllm (fails loud, never prompts)
+bash patch-vllm.sh
 
 .venv/bin/python prepare/build_fast_model.py models/Qwen3.8-27B-W4A16-AutoRound-fast
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
