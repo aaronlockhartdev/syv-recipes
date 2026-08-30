@@ -43,12 +43,13 @@ export VLLM_SPEC_DECODE_ATTN_QMAX=8
 # against gpu-memory-utilization; reserve them explicitly
 # (patches/hybrid-kv-groups-v2-cudagraph.patch)
 export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
-# off by default: the vision tower (~0.88 GiB, sharded across both GPUs)
-# stays GPU-resident; VLLM_VISION_CPU_OFFLOAD_GB=1 moves it to pinned host
-# RAM instead -- zero resident VRAM, bit-exact output, ~+12% on vision
-# forwards (measured on a PCIe 4.0 x16 3090)
+# on by default (the original's VISION_OFFLOAD=1): the vision tower
+# (~0.88 GiB, sharded across both GPUs) stays in pinned host RAM and each
+# module is copied to the GPU for its own forward -- zero resident VRAM,
+# bit-exact output, ~+12% on vision forwards (measured on a PCIe 4.0 x16
+# 3090); =0 keeps the tower GPU-resident
 # (patches/vision-tower-cpu-offload.patch)
-export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-0}
+export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
 # flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # DeltaNet's transient workspace fragments the allocator; expandable segments
@@ -57,6 +58,10 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 
 # no --language-model-only: the server takes image input; where the tower
 # lives is VLLM_VISION_CPU_OFFLOAD_GB above.
+# The two multimodal flags are the original repo's vision arguments: at most
+# one image per request, and a pixel cap below the processor default because
+# vLLM profiles the encoder at the largest image it accepts and that peak
+# comes out of the KV pool (2097152 px = 2048 image tokens).
 # --prefix-caching-hash-algo xxhash: 128-bit xxHash instead of the default
 # sha256 for prefix-cache block hashes (faster; needs the xxhash package).
 exec vllm serve "$MODEL" \
@@ -75,6 +80,8 @@ exec vllm serve "$MODEL" \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
+  --limit-mm-per-prompt '{"image":{"count":1}}' \
+  --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
   --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
