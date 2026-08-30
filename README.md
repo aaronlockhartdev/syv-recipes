@@ -9,14 +9,14 @@ no CTX/SPEC-style env-var configurations left to construct.
 
 | recipe | speculation | KV cache | the upstream config it matches |
 |---|---|---|---|
-| [recipes/dflash2.sh](recipes/dflash2.sh) | DFlash2 block drafter, 7 drafts in one pass | `int8_per_token_head`, prefix caching, 131 072 max len, 4 seqs | `SPEC=dflash2 CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2` |
-| [recipes/mtp.sh](recipes/mtp.sh) | Qwen's MTP head, 3 drafts, probabilistic | `int8_per_token_head`, prefix caching, 150 000 max len, 8 seqs | `SPEC=mtp CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2`, KV swapped fp8 → int8 |
+| [recipes/dflash2.sh](recipes/dflash2.sh) | DFlash2 block drafter, 7 drafts in one pass | `int8_per_token_head`, prefix caching, native max len, 4 seqs | `SPEC=dflash2 CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2` |
+| [recipes/mtp.sh](recipes/mtp.sh) | Qwen's MTP head, 3 drafts, probabilistic | `int8_per_token_head`, prefix caching, native max len, 8 seqs | `SPEC=mtp CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2`, KV swapped fp8 → int8 |
 
 Both recipes take image input (no `--language-model-only`): the ~0.9 GB
-vision tower lives in pinned host RAM by default
-(`VLLM_VISION_CPU_OFFLOAD_GB=1`) and is copied to the GPUs for each image
-forward — zero resident VRAM, bit-exact output, ~+12% on vision forwards;
-`=0` keeps it GPU-resident (it fits, and saves the copy). They use
+vision tower stays GPU-resident by default; `VLLM_VISION_CPU_OFFLOAD_GB=1`
+moves it to pinned host RAM instead — zero resident VRAM, bit-exact
+output, ~+12% on vision forwards (measured on a PCIe 4.0 x16 3090). They
+use
 `--gpu-memory-utilization 0.93` (the launcher's single-card KV pin does not
 apply under TP>1 — the pool is sized from utilization),
 `--mamba-ssm-cache-dtype float16` (halves the GDN recurrent-state cost),
@@ -90,7 +90,7 @@ The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
 - `spec-decode-attn.patch` — split-KV verify attention (`VLLM_SPEC_DECODE_ATTN`)
 - `spec-decode-int8-kv.patch` — the split-KV kernel reads the int8 per-token-head cache (what both recipes run on)
 - `speed-knobs-envs.patch` — registers the speed knobs as env vars (torch.compile cache key)
-- `vision-tower-cpu-offload.patch` — vision tower in pinned host RAM (on by default in both recipes, `VLLM_VISION_CPU_OFFLOAD_GB=1`; `=0` keeps it GPU-resident)
+- `vision-tower-cpu-offload.patch` — vision tower to pinned host RAM (off by default; `VLLM_VISION_CPU_OFFLOAD_GB=1` enables: zero resident VRAM, bit-exact, ~+12% on vision forwards)
 - `vllm-pr50021-gdn-spec-bounds.patch` — bounds on accepted-token state lookups in the GDN/Mamba spec kernels
 - `xgrammar-spec-terminated.patch` — structured output survives tokens accepted past the grammar's end
 

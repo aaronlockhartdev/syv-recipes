@@ -43,11 +43,12 @@ export VLLM_SPEC_DECODE_ATTN_QMAX=8
 # against gpu-memory-utilization; reserve them explicitly
 # (patches/hybrid-kv-groups-v2-cudagraph.patch)
 export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
-# the vision tower (~0.88 GiB, sharded across both GPUs) lives in pinned host
-# RAM and is copied over per image forward: zero resident VRAM, bit-exact,
-# ~+12% on vision forwards (measured on a PCIe 4.0 x16 3090); =0 keeps it
-# GPU-resident (patches/vision-tower-cpu-offload.patch)
-export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
+# off by default: the vision tower (~0.88 GiB, sharded across both GPUs)
+# stays GPU-resident; VLLM_VISION_CPU_OFFLOAD_GB=1 moves it to pinned host
+# RAM instead -- zero resident VRAM, bit-exact output, ~+12% on vision
+# forwards (measured on a PCIe 4.0 x16 3090)
+# (patches/vision-tower-cpu-offload.patch)
+export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-0}
 # flashinfer's sampler needs a current nvcc to JIT; the torch sampler is fine
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # DeltaNet's transient workspace fragments the allocator; expandable segments
