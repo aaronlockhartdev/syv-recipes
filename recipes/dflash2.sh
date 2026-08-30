@@ -76,7 +76,9 @@ exec vllm serve "$MODEL" \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
-  --max-num-batched-tokens 2048 \
+# 4096 prefill chunks (the original's 2048 was a single-card value; the
+# two 24 GB cards have room for the bigger prefill peak)
+  --max-num-batched-tokens 4096 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \

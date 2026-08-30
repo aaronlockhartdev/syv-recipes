@@ -5,7 +5,7 @@
 #
 # The flags are the argument set the upstream launcher produced for
 #   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
-# with two deliberate deviations:
+# with three deliberate deviations:
 #   1. the KV cache is int8 per-token-head on the Triton backend instead of
 #      fp8 on FlashInfer (same per-token width, ~2x the pool of bf16), and
 #   2. VLLM_SPEC_DECODE_ATTN=1 is exported. Upstream only enabled the split-KV
@@ -14,6 +14,15 @@
 #      (every decode step of a speculating request) fast enough to matter.
 #      Upstream never measured MTP with it -- validate acceptance on your
 #      workload before trusting it.
+#   3. cudagraph_mode is forced to PIECEWISE. vLLM 0.27.1's default
+#      (FULL_AND_PIECEWISE) has a documented corruption in the MTP path:
+#      with a prefix-cache hit, one templated prompt length in 128
+#      (length % 128 == k+1 == 4 here) stops the first verify token and
+#      returns "" or "#" -- or, on one measured geometry, fluent wrong
+#      text. Upstream forced PIECEWISE for MTP in its long-context config
+#      for exactly this reason ("for CORRECTNESS, not preference"); the
+#      measured cost at the lengths this recipe serves is none (8k: 93.5
+#      vs 87.8 tok/s, 16k-50k within noise).
 #
 # The exported env vars support the patch stack (split-KV verify attention,
 # vision-tower offload) and the flashinfer/torch-allocator interaction; the
@@ -74,13 +83,15 @@ exec vllm serve "$MODEL" \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
-  --max-num-batched-tokens 2048 \
+# 4096 prefill chunks (the original's 2048 was a single-card value; the
+# two 24 GB cards have room for the bigger prefill peak)
+  --max-num-batched-tokens 4096 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
   --limit-mm-per-prompt '{"image":{"count":1}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
-  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --compilation-config '{"max_cudagraph_capture_size":32,"cudagraph_mode":"PIECEWISE","custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder

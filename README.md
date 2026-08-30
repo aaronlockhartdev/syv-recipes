@@ -29,9 +29,13 @@ non-cryptographic collision caveat is moot on a single-user box; the
 `--gpu-memory-utilization 0.93` (the launcher's single-card KV pin does not
 apply under TP>1 — the pool is sized from utilization),
 `--mamba-ssm-cache-dtype float16` (halves the GDN recurrent-state cost),
-`--max-num-batched-tokens 2048`, the qwen3 reasoning parser, and `qwen3_coder`
-tool parsing. They default to port 8080 (`PORT=…`) and a `.venv` at the repo
-root (`MODEL`, `DRAFT` overridable the same way).
+`--max-num-batched-tokens 4096` (the original's 2048 was a single-card
+value; two 24 GB cards have room for the bigger prefill peak), the qwen3
+reasoning parser, and `qwen3_coder` tool parsing. The mtp recipe additionally
+forces `cudagraph_mode=PIECEWISE` — see its header for the documented
+FULL-mode corruption that motivates it. They default to port 8080
+(`PORT=…`) and a `.venv` at the repo root (`MODEL`, `DRAFT` overridable the
+same way).
 
 ## Layout
 
@@ -49,19 +53,44 @@ docker/             entrypoint.sh, prepare.sh
 
 ```bash
 docker build -t syv-recipes .
+
+# Reuse the host's existing Hugging Face cache so the container downloads
+# nothing you already have. The one-liner resolves to the same hub
+# directory the host's huggingface_hub uses, however it is configured:
+#   HF_HUB_CACHE=<dir>        → that dir
+#   HF_HOME=<root>            → <root>/hub
+#   (neither)                 → ~/.cache/huggingface/hub
+HUB="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
 docker run -d --name qwen --gpus all --ipc=host -p 8080:8080 \
   -v qwen-models:/app/models -v qwen-cache:/cache \
+  -v "$HUB":/cache/.cache/huggingface/hub \
   --restart unless-stopped syv-recipes            # entrypoint default: dflash2
 ```
 
 The entrypoint prepares the models on first start (downloading through the
-`qwen-cache` HF-cache volume, then seconds on a warm cache) and execs the
-recipe. `qwen-models` receives the assembled model dirs: hard-linked off the
-cache when both volumes share a filesystem (no extra space), a second
-~21 GB copy when they don't. `syv-recipes mtp` runs the other one;
-`syv-recipes prepare` runs only the prep; `PREPARE=0` skips the prep when the
-models volume already holds them. Set `VLLM_API_KEY=…` as an env var to turn
-on key auth — optional; without it the server binds 0.0.0.0 and is open.
+mounted HF hub cache — seconds when it is warm — and the `qwen-cache`
+volume for everything else), then execs the recipe. `qwen-models` receives
+the assembled model dirs: hard-linked off the cache when both volumes
+share a filesystem (no extra space), a second ~21 GB copy when they don't.
+`syv-recipes mtp` runs the other one; `syv-recipes prepare` runs only the
+prep; `PREPARE=0` skips the prep when the models volume already holds
+them. Set `VLLM_API_KEY=…` as an env var to turn on key auth — optional;
+without it the server binds 0.0.0.0 and is open.
+
+The `-v "$HUB":…` line is optional but recommended. Two things about it:
+
+- **It is a run-time mount, and that is the only kind there is.** `docker
+  build` cannot see host directories — its only inputs are the build
+  context and BuildKit-internal caches — and the cache is consumed at
+  run time anyway, since the prep runs inside the container on first
+  start. The container side is pinned in the Dockerfile
+  (`HF_HOME=/cache/.cache/huggingface`), so no in-container env var needs
+  to match your host's.
+- **Caveats.** The container runs as root, so anything it *downloads* into
+  your host cache is root-owned (world-readable, but removing it later
+  needs sudo). On Docker Desktop (macOS/WSL2) the mount crosses the
+  virtiofs boundary, so the prep's hard-links fall back to a full ~21 GB
+  copy — it works, it just uses the space.
 
 ## Bare metal (uv)
 

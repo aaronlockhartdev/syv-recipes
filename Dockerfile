@@ -43,10 +43,13 @@ COPY docker/ docker/
 COPY prepare/ prepare/
 COPY recipes/ recipes/
 
-# HOME is a volume: the HF hub cache (model prep downloads into it), the
-# torch.compile cache, Triton and FlashInfer JIT caches
+# HOME is a volume: the HF hub cache (model prep downloads into
+# /cache/.cache/huggingface/hub -- bind-mount the host's own hub directory
+# there to reuse it, see README: Docker), the torch.compile cache, and the
+# Triton and FlashInfer JIT caches. HF_HOME is pinned so the cache location
+# cannot drift if HOME is overridden at run time.
 RUN mkdir -p /cache /app/models && chmod 1777 /cache
-ENV HOME=/cache VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HOME=/cache HF_HOME=/cache/.cache/huggingface VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 HF_HUB_ENABLE_HF_TRANSFER=1
 VOLUME ["/cache", "/app/models"]
 EXPOSE 8080
 ENTRYPOINT ["bash", "docker/entrypoint.sh"]
