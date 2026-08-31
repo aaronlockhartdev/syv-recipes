@@ -30,6 +30,7 @@ and qwen3_coder tool parsing. The mtp recipe additionally forces
 ```
 Dockerfile          uv + pinned vLLM 0.27.1 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
+setup.sh            bare-metal one-shot: venv, deps, patches, model prep
 patch-vllm.sh       applies patches/ to the installed vllm (bare metal)
 recipes/            dflash2.sh, mtp.sh — the two ways to serve
 prepare/            build_fast_model.py, fetch_dflash2.py — one-time model prep
@@ -71,17 +72,32 @@ fall back to a full copy.
 ## Bare metal (uv)
 
 ```bash
-# once, if uv is not installed yet (and install patch if your distro lacks it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+bash setup.sh            # venv + pinned deps + the 17 patches + both models
+bash recipes/dflash2.sh  # or recipes/mtp.sh
+```
+
+`setup.sh` is idempotent and resumable — re-running it is the recovery
+path after a venv wipe or a stale-patch abort. Paths are overridable with
+env vars of the same names the recipes use (defaults: `.venv`,
+`models/Qwen3.8-27B-W4A16-AutoRound-fast`,
+`models/Qwen3.8-27B-DFlash2-W4A16`), so a custom layout stays consistent
+between setup and serve:
+
+```bash
+MODEL=/data/qwen VENV=/data/qwen/.venv bash setup.sh
+MODEL=/data/qwen bash recipes/dflash2.sh
+```
+
+What `setup.sh` runs, in order, if you'd rather do it by hand (install uv
+first, and `patch` if your distro lacks it:
+`curl -LsSf https://astral.sh/uv/install.sh | sh`):
+
+```bash
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements.txt
-
-# the 17 patches, against the installed vllm (fails loud, never prompts)
 bash patch-vllm.sh
-
 .venv/bin/python prepare/build_fast_model.py models/Qwen3.8-27B-W4A16-AutoRound-fast
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
-bash recipes/dflash2.sh        # or recipes/mtp.sh
 ```
 
 The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
