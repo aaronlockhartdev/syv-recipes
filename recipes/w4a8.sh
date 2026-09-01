@@ -1,5 +1,5 @@
 #!/bin/bash
-# int8-activations recipe: the dflash2 stack with W4A8 Marlin linears.
+# w4a8 recipe: the dflash2 stack with W4A8 Marlin linears.
 #
 # dflash2.sh's configuration plus VLLM_MARLIN_INPUT_DTYPE=int8, limited to
 # the layer set INT8_LAYERS selects (patches/marlin-int8-layer-select.patch;
@@ -44,7 +44,7 @@ fi
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
-    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[int8_act] removing stale offload region $f"; rm -f "$f"; }
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[w4a8] removing stale offload region $f"; rm -f "$f"; }
   done
 fi
 

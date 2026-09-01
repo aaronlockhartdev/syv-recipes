@@ -8,11 +8,15 @@ explicit flags — no CTX/SPEC-style configuration to construct.
 
 | recipe | KV cache | speculation | reach for it when |
 |---|---|---|---|
-| [dflash2.sh](recipes/dflash2.sh) (default) | `int8_per_token_head`, native max len | DFlash2 drafter, 7 drafts in one pass | the all-round pick: fastest decode, ~2x the pool of bf16 |
+| [dflash2.sh](recipes/dflash2.sh) (default) | `int8_per_token_head`, native max len | DFlash2 drafter, 7 drafts in one pass | the all-round pick: fastest decode, double the context pool of bf16 |
 | [mtp.sh](recipes/mtp.sh) | `int8_per_token_head`, native max len | Qwen's own MTP head, 3 drafts, probabilistic | no separate drafter model; the head ships inside the checkpoint |
-| [bf16.sh](recipes/bf16.sh) | unquantized bf16, FlashAttention | DFlash2, 7 | the quality baseline — no quantized-KV approximation anywhere |
-| [int4.sh](recipes/int4.sh) | `int4_per_token_head` | DFlash2, 7 | context capacity: ~2x the tokens of int8 in the same VRAM |
-| [int8_act.sh](recipes/int8_act.sh) | `int8_per_token_head` + W4A8 linears | DFlash2, 7 | prefill speed: +13-30% prefill tok/s at the documented quality cost |
+| [bf16.sh](recipes/bf16.sh) | unquantized bf16, FlashAttention | DFlash2, 7 | the quality baseline -- no quantized-KV approximation anywhere |
+| [int4.sh](recipes/int4.sh) | `int4_per_token_head` | DFlash2, 7 | context capacity: double the context of int8 in the same VRAM |
+| [w4a8.sh](recipes/w4a8.sh) | `int8_per_token_head` + W4A8 linears | DFlash2, 7 | faster prefill at the documented quality cost |
+
+The numbers in the notes below are upstream's, measured on their reference
+box; we have not benchmarked these recipes -- run them on your hardware
+before quoting a figure.
 
 All recipes take image input (no `--language-model-only`): up to 16 images
 per request, each capped at 2097152 px = 2048 tokens. The per-image cap
@@ -64,7 +68,7 @@ docker run -d --name qwen --gpus all --ipc=host -p 8080:8080 \
 The entrypoint prepares the models on first start (downloads through the
 mounted hub cache — seconds when it is warm; `qwen-cache` holds everything
 else), then execs the recipe: `syv-recipes mtp`, `bf16`, `int4` or
-`int8_act` for the others, `syv-recipes prepare` for prep only,
+`w4a8` for the others, `syv-recipes prepare` for prep only,
 `PREPARE=0` to skip it. `qwen-models` receives the assembled dirs:
 hard-linked off the cache when both volumes share a filesystem, a second
 ~21 GB copy when they don't. `VLLM_API_KEY=…` turns on key auth; without
@@ -118,7 +122,7 @@ The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
 - `hybrid-kv-groups-v2-cudagraph.patch` — KV-group sizing for the drafter's sliding-window layers; explicit CUDA-graph memory accounting (`VLLM_V2_CUDAGRAPH_MEM_MIB`)
 - `hybrid-sw-block-promote.patch` — lets a quantized KV cache fit in a hybrid target+drafter (block-size promotion instead of page padding)
 - `int4-kv-per-token-head.patch` — boot blockers for int4 per-token-head KV with the drafter
-- `marlin-int8-layer-select.patch` — env-selectable int8-activation layers for the Marlin path (the int8_act recipe)
+- `marlin-int8-layer-select.patch` -- env-selectable int8-activation layers for the Marlin path (the w4a8 recipe)
 - `marlin-int8-negative-scales.patch` — correctness fix for negative group scales in W4A8
 - `marlin-repack-staged-sm80.patch` — staged Marlin repack (load-time allocation hygiene)
 - `offload-dflash-eagle-groups.patch` — OffloadingConnector group flagging under dflash
@@ -139,7 +143,7 @@ drafting, and n-gram chains — the DFlash2 checkpoint proposes its trained
 
 ## Notes
 
-- **int8 KV is a trade** (dflash2, mtp, int8_act): ~2x the pool of bf16,
+- **int8 KV is a trade** (dflash2, mtp, w4a8): double the pool of bf16,
   at the cost of the Triton backend and a per-step unpack; its quality at
   depth was never measured upstream. Verify perplexity/GSM8K on your
   workload before trusting it.
@@ -154,7 +158,7 @@ drafting, and n-gram chains — the DFlash2 checkpoint proposes its trained
   with the `--prefix-match-unit 848` flag the recipe passes (without it
   the drafter's 848-token sliding-window block can never match the
   1696-token hash unit).
-- **int8_act is a quality-for-speed trade**: the default MLP-only layer
+- **w4a8 is a quality-for-speed trade**: the default MLP-only layer
   set costs +2.2% PPL for +13-14% prefill; `INT8_LAYERS=all` (the recipe
   expands the upstream shorthand to `mlp|linear_attn|self_attn`) is
   +27-30% at GSM8K 95.0 vs 96.5 and +4.1% PPL. Decode is unchanged
