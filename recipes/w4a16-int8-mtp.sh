@@ -1,11 +1,21 @@
 #!/bin/bash
-# DFlash2 recipe: block drafter (7 drafts in one pass), TP=2, prefix caching,
-# int8 per-token-head KV, vision enabled.
+# w4a16-int8-mtp: Qwen's own MTP head (3 drafts, probabilistic), TP=2, prefix
+# caching, int8 per-token-head KV, vision enabled.
 #
-# Flags are exactly what the upstream launcher produced for
-#   SPEC=dflash2 CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
-# (DFLASH_TOKENS=7 is its default), minus the single-card KV_MEM pin -- under
-# TP>1 the launcher drops it and sizes the KV pool from gpu-memory-utilization.
+# Flags are what the upstream launcher produced for
+#   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
+# with three deviations:
+#   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
+#      -- same per-token width, ~2x the pool of bf16.
+#   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
+#      only for bf16-KV and dflash2; patches/spec-decode-int8-kv.patch
+#      teaches it the int8 cache. Upstream never measured MTP with it, so
+#      validate draft acceptance on your workload.
+#   3. cudagraph_mode=PIECEWISE. The default (FULL_AND_PIECEWISE) has a
+#      documented MTP corruption: with a prefix-cache hit, one prompt length
+#      in 128 (here: length % 128 == 4) returns "" / "#" or fluent wrong
+#      text. Upstream forced PIECEWISE for MTP for correctness; at the
+#      served lengths it costs nothing measured.
 #
 # The env vars support the patch stack; the vllm line is the complete
 # server configuration.
@@ -13,12 +23,10 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
-DRAFT=${DRAFT:-$REPO/models/Qwen3.8-27B-DFlash2-W4A16}
 PORT=${PORT:-8080}
 export PATH="$REPO/.venv/bin:$PATH"
 
 [ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
-[ -f "$DRAFT/config.json" ] || { echo "no drafter at $DRAFT -- run: python prepare/fetch_dflash2.py <dir>" >&2; exit 1; }
 if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
@@ -27,18 +35,12 @@ fi
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
-    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[dflash2] removing stale offload region $f"; rm -f "$f"; }
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[w4a16-int8-mtp] removing stale offload region $f"; rm -f "$f"; }
   done
 fi
 
-# split-KV verify attention reading the int8 cache
-# (patches/spec-decode-attn.patch + spec-decode-int8-kv.patch); QMAX = the 8-token verify block
+# split-KV verify attention reading the int8 cache (see header)
 export VLLM_SPEC_DECODE_ATTN=1
-export VLLM_SPEC_DECODE_ATTN_QMAX=8
-# the V2 runner (forced by dflash) doesn't count its ~1.4 GiB of CUDA graphs
-# against gpu-memory-utilization, so they're reserved here
-# (patches/hybrid-kv-groups-v2-cudagraph.patch)
-export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
 # vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
 # off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
@@ -58,7 +60,7 @@ exec vllm serve "$MODEL" \
   --tensor-parallel-size 2 \
   --gpu-memory-utilization 0.93 \
   --max-model-len auto \
-  --max-num-seqs 4 \
+  --max-num-seqs 8 \
   --api-server-count 1 \
   --attention-backend TRITON_ATTN \
   --kv-cache-dtype int8_per_token_head \
@@ -70,8 +72,8 @@ exec vllm serve "$MODEL" \
   --mamba-cache-mode align \
   --limit-mm-per-prompt '{"image":{"count":16}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
-  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
-  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
+  --compilation-config '{"max_cudagraph_capture_size":32,"cudagraph_mode":"PIECEWISE","custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder

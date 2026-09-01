@@ -49,7 +49,7 @@ def main():
             shutil.copy(src, dstp)
         print(f"== {f}: {dstp}")
     print("DFlash2 drafter ready:", dst)
-    print("serve with: recipes/dflash2.sh (this dir as DRAFT)")
+    print("serve with: the dflash2-family recipes (this dir as DRAFT)")
 
 
 if __name__ == "__main__":

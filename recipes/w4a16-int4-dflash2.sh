@@ -1,5 +1,5 @@
 #!/bin/bash
-# int4 recipe: the dflash2 stack with the int4 per-token-head KV cache.
+# w4a16-int4-dflash2: the dflash2 stack with the int4 per-token-head KV cache.
 #
 # The context-capacity play: int4 KV halves the bytes of the int8 cache, so
 # the same VRAM pool holds ~2x the context (upstream's single-card profile
@@ -13,7 +13,7 @@
 # opt-in with correctness checks still owed (their MR-DRAFT); we keep it on
 # because the 2D fallback is ~10x slower in deep decode (3.6 vs 29 tok/s),
 # i.e. disabling speculation is the only alternative -- sanity-check
-# outputs against bf16.sh on the same prompts.
+# outputs against w4a16-bf16-dflash2 on the same prompts.
 #
 # --prefix-match-unit 848 is not optional here: under int4's halved-page
 # geometry the drafter's sliding-window block is 848 tokens against a 1696
@@ -41,7 +41,7 @@ fi
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
-    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[int4] removing stale offload region $f"; rm -f "$f"; }
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[w4a16-int4-dflash2] removing stale offload region $f"; rm -f "$f"; }
   done
 fi
 

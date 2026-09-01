@@ -1,32 +1,26 @@
 #!/bin/bash
-# MTP recipe: Qwen's own MTP head (3 drafts, probabilistic), TP=2, prefix
-# caching, int8 per-token-head KV, vision enabled.
+# w4a16-bf16-dflash2: the dflash2 stack with the unquantized bf16 KV cache.
 #
-# Flags are what the upstream launcher produced for
-#   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
-# with three deviations:
-#   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
-#      -- same per-token width, ~2x the pool of bf16.
-#   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
-#      only for bf16-KV and dflash2; patches/spec-decode-int8-kv.patch
-#      teaches it the int8 cache. Upstream never measured MTP with it, so
-#      validate draft acceptance on your workload.
-#   3. cudagraph_mode=PIECEWISE. The default (FULL_AND_PIECEWISE) has a
-#      documented MTP corruption: with a prefix-cache hit, one prompt length
-#      in 128 (here: length % 128 == 4) returns "" / "#" or fluent wrong
-#      text. Upstream forced PIECEWISE for MTP for correctness; at the
-#      served lengths it costs nothing measured.
+# The original upstream dflash2 mainline (SPEC=dflash2 CTX=fast): FlashAttention
+# with bf16 KV, where the split-KV verify kernel's original bf16 path applies
+# (patches/spec-decode-attn.patch). dflash2 is the fastest spec method here --
+# upstream measured 4.80 tokens/step and 96.5% GSM8K on this shape -- and FULL
+# CUDA-graph capture is safe with it (all 128 prefix-cache residues swept
+# clean), so this recipe does not force PIECEWISE like w4a16-int8-mtp does.
 #
-# The env vars support the patch stack; the vllm line is the complete
-# server configuration.
+# The trade vs w4a16-int8-dflash2: bf16 KV is 2x the bytes of int8, so
+# pool holds ~half the context, and prefill is slower (FA2, no int8 KV path).
+# It is the quality baseline -- no quantized-KV approximation anywhere.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
+DRAFT=${DRAFT:-$REPO/models/Qwen3.8-27B-DFlash2-W4A16}
 PORT=${PORT:-8080}
 export PATH="$REPO/.venv/bin:$PATH"
 
 [ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
+[ -f "$DRAFT/config.json" ] || { echo "no drafter at $DRAFT -- run: python prepare/fetch_dflash2.py <dir>" >&2; exit 1; }
 if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
@@ -35,12 +29,18 @@ fi
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
-    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[mtp] removing stale offload region $f"; rm -f "$f"; }
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[w4a16-bf16-dflash2] removing stale offload region $f"; rm -f "$f"; }
   done
 fi
 
-# split-KV verify attention reading the int8 cache (see header)
+# split-KV verify attention over the bf16 cache (patches/spec-decode-attn.patch);
+# QMAX = the 8-token verify block
 export VLLM_SPEC_DECODE_ATTN=1
+export VLLM_SPEC_DECODE_ATTN_QMAX=8
+# the V2 runner (forced by dflash) doesn't count its ~1.4 GiB of CUDA graphs
+# against gpu-memory-utilization, so they're reserved here
+# (patches/hybrid-kv-groups-v2-cudagraph.patch)
+export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
 # vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
 # off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
@@ -60,10 +60,10 @@ exec vllm serve "$MODEL" \
   --tensor-parallel-size 2 \
   --gpu-memory-utilization 0.93 \
   --max-model-len auto \
-  --max-num-seqs 8 \
+  --max-num-seqs 4 \
   --api-server-count 1 \
-  --attention-backend TRITON_ATTN \
-  --kv-cache-dtype int8_per_token_head \
+  --attention-backend FLASH_ATTN \
+  --kv-cache-dtype bfloat16 \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
   --max-num-batched-tokens 4096 \
@@ -72,8 +72,8 @@ exec vllm serve "$MODEL" \
   --mamba-cache-mode align \
   --limit-mm-per-prompt '{"image":{"count":16}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
-  --speculative-config '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
-  --compilation-config '{"max_cudagraph_capture_size":32,"cudagraph_mode":"PIECEWISE","custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
+  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder

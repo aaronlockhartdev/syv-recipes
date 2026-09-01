@@ -249,7 +249,7 @@ def main():
 
     assert complete(dst, fast), "assembly finished but the completeness check still fails"
     print("fast model ready:", dst)
-    print("serve with: recipes/dflash2.sh or recipes/mtp.sh (this dir as MODEL)")
+    print("serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
 
 
 if __name__ == "__main__":

@@ -36,4 +36,4 @@ echo "== prepare/build_fast_model.py $MODEL"
 echo "== prepare/fetch_dflash2.py $DRAFT"
 "$VENV/bin/python" "$DIR/prepare/fetch_dflash2.py" "$DRAFT"
 
-echo "ready:  bash $DIR/recipes/dflash2.sh   or   bash $DIR/recipes/mtp.sh"
+echo "ready:  bash $DIR/recipes/w4a16-int8-dflash2.sh   or any of the recipes/"
