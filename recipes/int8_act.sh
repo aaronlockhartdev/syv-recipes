@@ -12,13 +12,17 @@
 #   prefill tok/s            1k      4k      16k     51k
 #   W4A16 (dflash2.sh)     1,437   1,494   1,410   1,200
 #   mlp (the default)      1,638   1,696   1,587   1,320    (+13-14%)
-#   all                    1,845   1,937   1,791   1,423    (+27-30%)
+#   all*                   1,845   1,937   1,791   1,423    (+27-30%)
+#
+#   *all = mlp|linear_attn|self_attn, expanded below. The layer matcher is
+#   a regex over the layer name, so the word "all" itself would match
+#   nothing -- this recipe maps it to the explicit list upstream means.
 #
 # Quality is the documented int8 trade: the default mlp set is the gentler
-# variant (+0.9% PPL); all is GSM8K 95.0% (baseline 96.5) and PPL +4.1%,
-# mostly prose, code flat. The GDN-only middle (mlp|linear_attn) crashes at
-# first forward on this torch/vLLM combo -- an inductor codegen bug; use
-# mlp or all.
+# variant (+2.2% PPL, IFBench flat); all is GSM8K 95.0% (baseline 96.5)
+# and PPL +4.1%, mostly prose, code flat. The GDN-only middle
+# (mlp|linear_attn) crashes at first forward on this torch/vLLM combo --
+# an inductor codegen bug; use mlp or all.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
@@ -26,6 +30,8 @@ MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
 DRAFT=${DRAFT:-$REPO/models/Qwen3.8-27B-DFlash2-W4A16}
 PORT=${PORT:-8080}
 INT8_LAYERS=${INT8_LAYERS:-mlp}
+# expand upstream's "all" shorthand to the explicit list (see header)
+[ "$INT8_LAYERS" = all ] && INT8_LAYERS='mlp|linear_attn|self_attn'
 export PATH="$REPO/.venv/bin:$PATH"
 
 [ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }

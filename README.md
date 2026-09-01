@@ -28,9 +28,10 @@ cost), `--max-num-batched-tokens 4096`, the qwen3 reasoning parser,
 qwen3_coder tool parsing, and `--enable-prompt-tokens-details`, so every
 response's `usage.prompt_tokens_details.cached_tokens` shows how much of
 the prompt the prefix cache served. Port 8080 (`PORT=…`) and a `.venv` at
-the repo root (`MODEL`, `DRAFT` overridable the same way). The four
-dflash2-family recipes use FULL CUDA-graph capture (safe with dflash2);
-mtp.sh forces PIECEWISE — see its header.
+the repo root (`MODEL`, `DRAFT` overridable the same way). The dflash2-
+family recipes run the default FULL_AND_PIECEWISE capture (upstream swept
+dflash2 clean across every 128-residue prompt length in FULL mode);
+mtp.sh forces PIECEWISE -- see its header.
 
 ## Layout
 
@@ -146,12 +147,18 @@ drafting, and n-gram chains — the DFlash2 checkpoint proposes its trained
   shape (dflash2, 4.80 tokens/step). If a quantized recipe's output looks
   off, this is the one to compare against.
 - **int4 is unproven at depth**: upstream profiled the single-card version
-  (314,915-token pool at 256k) but never measured its quality; it also
-  costs ~20% decode vs the bf16 path.
+  (314,915-token pool at 256k) but never measured its quality, and its
+  verify kernel (VLLM_INT4_MQ_3D) is still opt-in upstream with checks
+  owed -- compare outputs against bf16.sh before trusting it. It also
+  costs ~20% decode vs the bf16 path, and its prefix cache only works
+  with the `--prefix-match-unit 848` flag the recipe passes (without it
+  the drafter's 848-token sliding-window block can never match the
+  1696-token hash unit).
 - **int8_act is a quality-for-speed trade**: the default MLP-only layer
-  set costs +0.9% PPL for +13-14% prefill; `INT8_LAYERS=all` (
-  `mlp|linear_attn|self_attn`) is +27-30% at GSM8K 95.0 vs 96.5 and
-  +4.1% PPL. Decode is unchanged either way (memory-bound).
+  set costs +2.2% PPL for +13-14% prefill; `INT8_LAYERS=all` (the recipe
+  expands the upstream shorthand to `mlp|linear_attn|self_attn`) is
+  +27-30% at GSM8K 95.0 vs 96.5 and +4.1% PPL. Decode is unchanged
+  either way (memory-bound).
 - **MTP + split-KV verify**: a configuration upstream never measured (see
   the mtp header); check draft acceptance on your workload.
 - **TP=2**: upstream measured +16–35% decode at C1 vs one 3090 (PCIe x8,

@@ -5,13 +5,23 @@
 # the same VRAM pool holds ~2x the context (upstream's single-card profile
 # of exactly this shape served a 314,915-token pool at 256k max len, vs
 # 57,669 for the bf16 config -- PR #42). Costs ~20% decode vs the bf16
-# FlashAttention path, and the int4 cache's quality at depth has not been
-# measured upstream -- verify on your workload before trusting it.
+# FlashAttention path.
 #
-# Needs two patches: patches/int4-kv-per-token-head.patch (boot blockers for
-# int4 KV with the drafter) and patches/spec-decode-int4-kv-mq3d.patch
-# (VLLM_INT4_MQ_3D, below). It does NOT use the split-KV verify kernel:
-# that kernel reads bf16/int8 caches only, so VLLM_SPEC_DECODE_ATTN is
+# Two unverified items upstream, so trust but verify on your workload:
+# (1) the cache's quality at depth has never been measured; (2)
+# VLLM_INT4_MQ_3D (below) is the multi-query 3D dispatch upstream ships
+# opt-in with correctness checks still owed (their MR-DRAFT); we keep it on
+# because the 2D fallback is ~10x slower in deep decode (3.6 vs 29 tok/s),
+# i.e. disabling speculation is the only alternative -- sanity-check
+# outputs against bf16.sh on the same prompts.
+#
+# --prefix-match-unit 848 is not optional here: under int4's halved-page
+# geometry the drafter's sliding-window block is 848 tokens against a 1696
+# hash unit, and without the flag the prefix cache can never match this KV
+# layout (upstream: wsl2-4090.md). Needs two patches: patches/int4-kv-
+# per-token-head.patch (boot blockers for int4 KV with the drafter) and
+# patches/spec-decode-int4-kv-mq3d.patch (VLLM_INT4_MQ_3D). The split-KV
+# verify kernel reads bf16/int8 caches only, so VLLM_SPEC_DECODE_ATTN is
 # deliberately unset here.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,6 +83,7 @@ exec vllm serve "$MODEL" \
   --max-num-batched-tokens 4096 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
+  --prefix-match-unit 848 \
   --mamba-cache-mode align \
   --limit-mm-per-prompt '{"image":{"count":16}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
