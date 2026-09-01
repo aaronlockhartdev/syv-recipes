@@ -1,32 +1,35 @@
 #!/bin/bash
-# MTP recipe: Qwen's own MTP head (3 drafts, probabilistic), TP=2, prefix
-# caching, int8 per-token-head KV, vision enabled.
+# int8-activations recipe: the dflash2 stack with W4A8 Marlin linears.
 #
-# Flags are what the upstream launcher produced for
-#   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
-# with three deviations:
-#   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
-#      -- same per-token width, ~2x the pool of bf16.
-#   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
-#      only for bf16-KV and dflash2; patches/spec-decode-int8-kv.patch
-#      teaches it the int8 cache. Upstream never measured MTP with it, so
-#      validate draft acceptance on your workload.
-#   3. cudagraph_mode=PIECEWISE. The default (FULL_AND_PIECEWISE) has a
-#      documented MTP corruption: with a prefix-cache hit, one prompt length
-#      in 128 (here: length % 128 == 4) returns "" / "#" or fluent wrong
-#      text. Upstream forced PIECEWISE for MTP for correctness; at the
-#      served lengths it costs nothing measured.
+# dflash2.sh's configuration plus VLLM_MARLIN_INPUT_DTYPE=int8, limited to
+# the layer set INT8_LAYERS selects (patches/marlin-int8-layer-select.patch;
+# its default exclude keeps the int8-weight lm_head and the MTP module on
+# W4A16, where W8A8 is unsupported). Prefill is compute-bound at every
+# concurrency, so the int8 tensor-core GEMMs buy prefill speed; decode is
+# memory-bound and unchanged. Upstream measured on this stack (seeded
+# protocol, dflash2, prefix caching):
 #
-# The env vars support the patch stack; the vllm line is the complete
-# server configuration.
+#   prefill tok/s            1k      4k      16k     51k
+#   W4A16 (dflash2.sh)     1,437   1,494   1,410   1,200
+#   mlp (the default)      1,638   1,696   1,587   1,320    (+13-14%)
+#   all                    1,845   1,937   1,791   1,423    (+27-30%)
+#
+# Quality is the documented int8 trade: the default mlp set is the gentler
+# variant (+0.9% PPL); all is GSM8K 95.0% (baseline 96.5) and PPL +4.1%,
+# mostly prose, code flat. The GDN-only middle (mlp|linear_attn) crashes at
+# first forward on this torch/vLLM combo -- an inductor codegen bug; use
+# mlp or all.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
+DRAFT=${DRAFT:-$REPO/models/Qwen3.8-27B-DFlash2-W4A16}
 PORT=${PORT:-8080}
+INT8_LAYERS=${INT8_LAYERS:-mlp}
 export PATH="$REPO/.venv/bin:$PATH"
 
 [ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
+[ -f "$DRAFT/config.json" ] || { echo "no drafter at $DRAFT -- run: python prepare/fetch_dflash2.py <dir>" >&2; exit 1; }
 if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
@@ -35,15 +38,24 @@ fi
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
-    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[mtp] removing stale offload region $f"; rm -f "$f"; }
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[int8_act] removing stale offload region $f"; rm -f "$f"; }
   done
 fi
 
-# split-KV verify attention reading the int8 cache (see header)
+# split-KV verify attention reading the int8 KV cache
+# (patches/spec-decode-attn.patch + spec-decode-int8-kv.patch); QMAX = the 8-token verify block
 export VLLM_SPEC_DECODE_ATTN=1
+export VLLM_SPEC_DECODE_ATTN_QMAX=8
+# the V2 runner (forced by dflash) doesn't count its ~1.4 GiB of CUDA graphs
+# against gpu-memory-utilization, so they're reserved here
+# (patches/hybrid-kv-groups-v2-cudagraph.patch)
+export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
 # vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
 # off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
+# W4A8 activations for the selected layers (see header)
+export VLLM_MARLIN_INPUT_DTYPE=int8
+export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
 # torch sampler (flashinfer's needs nvcc to JIT)
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
@@ -60,7 +72,7 @@ exec vllm serve "$MODEL" \
   --tensor-parallel-size 2 \
   --gpu-memory-utilization 0.93 \
   --max-model-len auto \
-  --max-num-seqs 8 \
+  --max-num-seqs 4 \
   --api-server-count 1 \
   --attention-backend TRITON_ATTN \
   --kv-cache-dtype int8_per_token_head \
@@ -72,8 +84,8 @@ exec vllm serve "$MODEL" \
   --mamba-cache-mode align \
   --limit-mm-per-prompt '{"image":{"count":16}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
-  --speculative-config '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
-  --compilation-config '{"max_cudagraph_capture_size":32,"cudagraph_mode":"PIECEWISE","custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
+  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder

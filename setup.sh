@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bare-metal one-shot: uv venv + pinned deps + the 17 patches + both models.
+# Bare-metal one-shot: uv venv + pinned deps + the 19 patches + both models.
 #
 # Zero arguments. Paths overridable with the same env vars the recipes use,
 # so setup and serve can never disagree:  VENV  (default ./.venv),  MODEL,  DRAFT
