@@ -48,10 +48,10 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
 # no --language-model-only: the server takes image input.
-# Vision args are the original's: one image per request, and a pixel cap
-# (2097152 px = 2048 image tokens) since vLLM profiles the encoder at the
-# largest accepted image and that peak comes out of the KV pool.
-# xxhash: faster prefix-cache block hashes than the default sha256.
+# Vision: up to 8 images per request, each capped at 2097152 px = 2048
+# tokens -- the cap (not the count) sets the encoder's profiled peak in
+# the KV pool (at most the 4096-token encoder budget); the count only
+# bounds per-request context. xxhash: faster prefix-cache hashes than sha256.
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
@@ -68,7 +68,7 @@ exec vllm serve "$MODEL" \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
-  --limit-mm-per-prompt '{"image":{"count":1}}' \
+  --limit-mm-per-prompt '{"image":{"count":8}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
   --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \

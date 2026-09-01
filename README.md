@@ -11,12 +11,12 @@ serve` with explicit flags — no CTX/SPEC-style configuration to construct.
 | [recipes/dflash2.sh](recipes/dflash2.sh) | DFlash2 block drafter, 7 drafts in one pass | `int8_per_token_head`, prefix caching, native max len, 4 seqs | `SPEC=dflash2 CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2` |
 | [recipes/mtp.sh](recipes/mtp.sh) | Qwen's MTP head, 3 drafts, probabilistic | `int8_per_token_head`, prefix caching, native max len, 8 seqs | `SPEC=mtp CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2`, KV swapped fp8 → int8 |
 
-Both recipes take image input (no `--language-model-only`) with the
-original repo's vision arguments: one image per request, and a pixel cap
-(2097152 px = 2048 image tokens) so the encoder's profiling peak stays
-small in the KV pool. The ~0.9 GB vision tower is offloaded to pinned
-host RAM by default (`VLLM_VISION_CPU_OFFLOAD_GB=1`; `=0` keeps it
-GPU-resident). They also use `--enable-prefix-caching` with
+Both recipes take image input (no `--language-model-only`): up to 8
+images per request, each capped at 2097152 px = 2048 tokens. The per-image
+cap (not the count) sets the encoder's profiled peak, which comes out of
+the KV pool; the count only bounds per-request context. The ~0.9 GB vision
+tower is offloaded to pinned host RAM by default (`VLLM_VISION_CPU_OFFLOAD_GB=1`;
+`=0` keeps it GPU-resident). They also use `--enable-prefix-caching` with
 `--prefix-caching-hash-algo xxhash` (the `xxhash` package is in
 requirements.txt), `--gpu-memory-utilization 0.93` (under TP>1 the pool is
 sized from utilization), `--mamba-ssm-cache-dtype float16` (halves the GDN
