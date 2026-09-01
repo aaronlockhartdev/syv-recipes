@@ -11,7 +11,7 @@ serve` with explicit flags — no CTX/SPEC-style configuration to construct.
 | [recipes/dflash2.sh](recipes/dflash2.sh) | DFlash2 block drafter, 7 drafts in one pass | `int8_per_token_head`, prefix caching, native max len, 4 seqs | `SPEC=dflash2 CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2` |
 | [recipes/mtp.sh](recipes/mtp.sh) | Qwen's MTP head, 3 drafts, probabilistic | `int8_per_token_head`, prefix caching, native max len, 8 seqs | `SPEC=mtp CTX=long PREFIX_CACHE=1`, `--tensor-parallel-size 2`, KV swapped fp8 → int8 |
 
-Both recipes take image input (no `--language-model-only`): up to 8
+Both recipes take image input (no `--language-model-only`): up to 16
 images per request, each capped at 2097152 px = 2048 tokens. The per-image
 cap (not the count) sets the encoder's profiled peak, which comes out of
 the KV pool; the count only bounds per-request context. The ~0.9 GB vision
