@@ -75,6 +75,47 @@ except ImportError:  # non-POSIX: skip the run lock rather than crash
     _flock = None
 
 REPO = Path(__file__).resolve().parent.parent  # this script lives in prepare/
+
+
+_SHELL_SPECIAL = frozenset(
+    {"IFS", "GLOBIGNORE", "CDPATH", "BASH_ENV", "ENV", "SHELLOPTS", "PS1",
+     "LINENO", "PWD", "OLDPWD", "SECONDS", "RANDOM", "UID", "EUID"})
+
+
+def _dotenv():
+    """Fill unset-or-empty env vars from REPO/.env, with the same contract
+    the recipes use: the real environment always wins (a set, non-empty value
+    is never touched), values may be quoted, whole-line # comments only, and
+    a bare KEY= is skipped (empty means unset, like bash's :-)."""
+    p = REPO / ".env"
+    try:
+        if not p.is_file():
+            return
+        lines = p.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return
+    for line in lines:
+        line = line.lstrip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        if (
+            not k
+            or k[0].isdigit()
+            or not k.replace("_", "").isalnum()
+            or not k.isascii()
+            or k in _SHELL_SPECIAL
+        ):
+            continue
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if v and not os.environ.get(k):
+            os.environ[k] = v
+
+
+_dotenv()
 VENV = Path(os.environ.get("VENV") or REPO / ".venv")
 PY = VENV / "bin" / "python"
 STAMP = VENV / ".vllm-patch-stamp"

@@ -102,7 +102,8 @@ others, `syv-recipes prepare` for prep only,
 `PREPARE=0` to skip it. `qwen-models` receives the assembled dirs:
 hard-linked off the cache when both volumes share a filesystem, a second
 ~21 GB copy when they don't. `VLLM_API_KEY=…` turns on key auth; without
-it the server binds 0.0.0.0 and is open.
+it the server binds 0.0.0.0 and is open. Any of these can be passed from a
+`.env` with `--env-file`.
 
 The `-v "$HUB":…` mount is a run-time one (docker build cannot see host
 directories, and the cache is consumed at run time by the prep anyway);
@@ -139,6 +140,16 @@ MODEL=/data/qwen VENV=/data/qwen/.venv ./setup.py
 MODEL=/data/qwen bash recipes/w4a16-int8-dflash2.sh
 ```
 
+The same overrides can live in a `.env` file at the repo root instead:
+every recipe and both `setup.py` and `patch_vllm.py` read it, but only for
+a variable that is unset or empty in the real environment, which always
+wins. Values may be quoted; whole-line `#` comments only. The variables the
+scripts and recipes consume are `VENV`, `MODEL`, `DRAFT` and `PORT` (e.g.
+`VENV=/data/qwen/.venv`); note the `VLLM_*` env vars each recipe hard-exports
+are always set by the recipe itself, so a `.env` cannot change them.
+In the container use the native equivalent, `docker run --env-file .env`
+(`.env` is gitignored and out of the build context).
+
 What `setup.py` runs, in order, if you'd rather do it by hand (install uv
 first, and GNU `patch` if your distro lacks it:
 `curl -LsSf https://astral.sh/uv/install.sh | sh`):
@@ -151,8 +162,9 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 ```
 
-The recipes put `./.venv/bin` on PATH and default to port 8080; `MODEL`,
-`DRAFT` and `PORT` may be overridden with env vars of the same names.
+The recipes put the venv's `bin` on PATH (`VENV`, defaulting to `.venv`) and
+default to port 8080; `MODEL`, `DRAFT` and `PORT` may be overridden with
+env vars of the same names.
 
 ## The kept patches (all written against vLLM 0.27.1)
 

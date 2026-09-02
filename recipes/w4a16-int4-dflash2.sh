@@ -26,14 +26,42 @@
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
+
+# .env at the repo root: fills any variable below that is unset or empty in
+# the real environment (which always wins); values may be quoted, whole-line
+# # comments only.
+if [ -f "$REPO/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|\#*) continue ;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    [ "$k" != "$line" ] || continue
+    k="${k%"${k##*[![:space:]]}"}"
+    case "$k" in ''|*[!A-Za-z0-9_]*|[0-9]*) continue ;; esac
+    # never let a .env flip a shell-control variable (GLOBIGNORE would
+    # silently disable the /dev/shm cleanup glob below, among others)
+    case "$k" in IFS|GLOBIGNORE|CDPATH|BASH_ENV|ENV|SHELLOPTS|PS1|LINENO|PWD|OLDPWD|SECONDS|RANDOM|UID|EUID) continue ;; esac
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    v="${v%$'\r'}"
+    v="${v#\"}"; v="${v%\"}"
+    if [ "${#v}" -ge 2 ] && [ "${v:0:1}" = "${v: -1}" ]; then
+      [ "${v:0:1}" = "'" ] && v="${v:1:${#v}-2}"
+    fi
+    [ -n "$v" ] || continue
+    [ -n "${!k:-}" ] || export "$k=$v"
+  done < "$REPO/.env"
+fi
+
+VENV=${VENV:-$REPO/.venv}
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
 DRAFT=${DRAFT:-$REPO/models/Qwen3.8-27B-DFlash2-W4A16}
 PORT=${PORT:-8080}
-export PATH="$REPO/.venv/bin:$PATH"
+export PATH="$VENV/bin:$PATH"
 
 [ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
 [ -f "$DRAFT/config.json" ] || { echo "no drafter at $DRAFT -- run: python prepare/fetch_dflash2.py <dir>" >&2; exit 1; }
-if [ ! -x "$REPO/.venv/bin/vllm" ] && ! command -v vllm >/dev/null; then
+if [ ! -x "$VENV/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi
 
