@@ -67,6 +67,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import _ui as ui
 from pathlib import Path
 
 try:
@@ -124,46 +125,6 @@ FRESH, APPLIED, CONFLICT = "fresh", "applied", "conflict"
 # GNU patch is required (macOS ships a netbsd-derived one with different
 # --batch/-R semantics); gpatch is Homebrew's GNU build
 PATCH = shutil.which("gpatch") or "patch"
-
-
-def _color():
-    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-
-
-def c(text, code):
-    return f"\x1b[{code}m{text}\x1b[0m" if _color() else text
-
-
-def dim(t):
-    return c(t, "2")
-
-
-def green(t):
-    return c(t, "32")
-
-
-def red(t):
-    return c(t, "31")
-
-
-def yellow(t):
-    return c(t, "33")
-
-
-def err(head, *lines):
-    print(f"  {red('×')} {head}", file=sys.stderr)
-    for i, line in enumerate(lines):
-        print(f"  {'╰─>' if i == 0 else '     '} {line}", file=sys.stderr)
-    sys.exit(1)
-
-
-def warn(msg):
-    print(dim(f"  {msg}"))
-
-
-def duration(t0):
-    ms = (time.monotonic() - t0) * 1000
-    return f"{ms:.0f}ms" if ms < 999 else f"{ms / 1000:.1f}s"
 
 
 def fingerprint(patches):
@@ -396,20 +357,26 @@ def dryrun(p, sp):
             return subprocess.run([PATCH, "-p1", "-d", str(sp), "--batch", "--dry-run"],
                                   stdin=fh, capture_output=True, text=True)
     except FileNotFoundError:
-        err("patch is not on PATH", "install it:  apt install patch")
+        ui.fail("patch is not on PATH", "install it:  apt install patch")
 
 
-def apply_real(p, sp, reverse=False, quiet=False):
+def apply_real(p, sp, reverse=False):
+    """One real apply, captured: the script's own lines report progress,
+    not patch's. The combined output is the failure evidence."""
     cmd = [PATCH, "-p1", "-d", str(sp), "--batch"]
     if reverse:
         cmd.append("-R")
     try:
         with open(p, "rb") as fh:
-            if quiet:  # mirror-side probe: keep the raw hunk chatter off stdout
-                return subprocess.run(cmd, stdin=fh, capture_output=True, text=True)
-            return subprocess.run(cmd, stdin=fh)  # final applies stream as progress
+            return subprocess.run(cmd, stdin=fh, capture_output=True, text=True)
     except FileNotFoundError:
-        err("patch is not on PATH", "install it:  apt install patch")
+        ui.fail("patch is not on PATH", "install it:  apt install patch")
+
+
+def _output_tail(r):
+    """The last lines of a failed patch run -- the hunk evidence."""
+    out = (r.stdout or "") + (r.stderr or "")
+    return [l.strip() for l in out.splitlines() if l.strip()][-6:]
 
 
 def make_mirror(sp):
@@ -420,8 +387,8 @@ def make_mirror(sp):
         shutil.copytree(sp, root / sp.name, symlinks=True, copy_function=_copy_link)
     except OSError as e:
         shutil.rmtree(root, ignore_errors=True)
-        err("could not build a work copy of the vllm tree",
-            f"{e} -- free space in {tempfile.gettempdir()} (or point TMPDIR elsewhere) and re-run")
+        ui.fail("could not build a work copy of the vllm tree",
+                f"{e} -- free space in {tempfile.gettempdir()} (or point TMPDIR elsewhere) and re-run")
     return root / sp.name, root
 
 
@@ -440,31 +407,40 @@ def _copy_link(a, b):
         shutil.copy2(a, b)
 
 
-def forward_chain(patches, sp, apply_to=None):
+def forward_chain(patches, sp, apply_to=None, tick=None, failures=None):
     """Classify in build order. With apply_to, FRESH patches are applied
     to it as the pass goes, so a patch that only applies after an earlier
     patch in the set is judged against the state it will actually see.
     Returns (verdicts, ok): ok when the chain completes -- every patch FRESH
-    (and applied, if apply_to) or APPLIED (skipped), with no CONFLICT."""
+    (and applied, if apply_to) or APPLIED (skipped), with no CONFLICT.
+    failures collects the hunk evidence of each CONFLICT."""
     verdicts = {}
     ok = True
     for p in patches:
         v = classify(p, sp)
+        if tick:
+            tick()
         if v == FRESH:
             # the content test says the hunk is absent; the dry-run says
             # the patch machinery will actually take it
-            if dryrun(p, sp).returncode != 0:
+            r = dryrun(p, sp)
+            if r.returncode != 0:
                 v = CONFLICT
+                if failures is not None:
+                    failures[p.name] = _output_tail(r)
         if v == FRESH and apply_to is not None:
-            if apply_real(p, apply_to, quiet=True).returncode != 0:
+            r = apply_real(p, apply_to)
+            if r.returncode != 0:
                 v = CONFLICT
+                if failures is not None:
+                    failures[p.name] = _output_tail(r)
         if v == CONFLICT:
             ok = False
         verdicts[p.name] = v
     return verdicts, ok
 
 
-def reverse_cascade(patches, sp):
+def reverse_cascade(patches, sp, tick=None):
     """True when the tree is exactly pristine + every patch applied in
     build order: the only order that undoes patches overlapping in the
     same file is the exact inverse of the build, so walk last to first.
@@ -474,8 +450,10 @@ def reverse_cascade(patches, sp):
         for p in reversed(patches):
             if classify(p, m) != APPLIED:
                 return False
-            if apply_real(p, m, reverse=True, quiet=True).returncode != 0:
+            if apply_real(p, m, reverse=True).returncode != 0:
                 return False
+            if tick:
+                tick()
         return True
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -483,12 +461,12 @@ def reverse_cascade(patches, sp):
 
 def reinstall(version):
     if version == "unknown":
-        err("the vllm version is not readable, so it cannot be reinstalled",
-            f"recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
+        ui.fail("the vllm version is not readable, so it cannot be reinstalled",
+                f"recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
     if shutil.which("uv") is None:
-        err("uv is not on PATH (needed to reinstall vllm)",
-            "one time:  curl -LsSf https://astral.sh/uv/install.sh | sh")
-    print(dim(f"  reinstalling vllm {version} pristine (uv, from its cache)"))
+        ui.fail("uv is not on PATH (needed to reinstall vllm)",
+                "one time:  curl -LsSf https://astral.sh/uv/install.sh | sh")
+    ui.note(f"reinstalling vllm {version} pristine (uv, from its cache)")
     # uv resolves the pin against its index (PyPI by default): this venv
     # was created from requirements.txt (by setup.py or the Dockerfile),
     # so that is the same distribution the venv already holds
@@ -496,9 +474,9 @@ def reinstall(version):
     r = subprocess.run(["uv", "pip", "install", "--python", str(PY),
                         "--force-reinstall", "--no-deps", pin])
     if r.returncode != 0:
-        err(f"uv could not reinstall vllm=={version}",
-            f"the venv may now hold a broken vllm -- recreate it:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
-            f"then re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}")
+        ui.fail(f"uv could not reinstall vllm=={version}",
+                f"the venv may now hold a broken vllm -- recreate it:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
+                f"then re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}")
 
 
 def main():
@@ -521,15 +499,15 @@ def main():
         try:
             os.execv(str(PY), [str(PY), os.path.abspath(__file__)] + sys.argv[1:])
         except OSError as e:
-            err(f"cannot exec the venv's python at {PY}",
-                f"it exists but {e.strerror or 'the exec failed'} -- check its permissions, or recreate the venv")
+            ui.fail(f"cannot exec the venv's python at {PY}",
+                    f"it exists but {e.strerror or 'the exec failed'} -- check its permissions, or recreate the venv")
 
     t0 = time.monotonic()
 
     if not PY.is_file():
-        err(f"no python at {PY}",
-            f"create the venv first:  uv venv {VENV} --python 3.12",
-            "or point VENV at an existing one")
+        ui.fail(f"no python at {PY}",
+                f"create the venv first:  uv venv {VENV} --python 3.12",
+                "or point VENV at an existing one")
 
     # one run per venv: a concurrent run (or a human with patch) racing
     # the final applies would otherwise let --batch auto-reverse our
@@ -538,28 +516,29 @@ def main():
         lock = open(VENV / ".vllm-patch-lock", "a")
     except OSError:
         lock = None
-        warn(f"could not create {VENV / '.vllm-patch-lock'} -- running without the run lock")
+        ui.note(f"could not create {VENV / '.vllm-patch-lock'} -- running without the run lock")
     if _flock is not None and lock is not None:
         try:
             _flock.flock(lock, _flock.LOCK_EX | _flock.LOCK_NB)
         except OSError:
-            err("another patch_vllm run is in progress on this venv",
-                "wait for it to finish, then re-run")
+            ui.fail("another patch_vllm run is in progress on this venv",
+                    "wait for it to finish, then re-run")
 
     spec = importlib.util.find_spec("vllm")
     if spec is None or not spec.submodule_search_locations:
-        err(f"vllm is not installed in {VENV}",
-            f"install it first:  uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
+        ui.fail(f"vllm is not installed in {VENV}",
+                f"install it first:  uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
     sp = Path(spec.submodule_search_locations[0])
     try:
         version = importlib.metadata.version("vllm")
     except importlib.metadata.PackageNotFoundError:
-        version = "unknown"
-    print(dim(f"  vllm {version}  {sp}"))
+        version = None
+    version = version or "unknown"  # None: the dist exists but its metadata lacks a version
+    ui.note(f"vllm {version}  {sp}")
 
     patches = sorted((REPO / "patches").glob("*.patch"))
     if not patches:
-        err(f"no .patch files in {REPO / 'patches'}", "the repo looks incomplete")
+        ui.fail(f"no .patch files in {REPO / 'patches'}", "the repo looks incomplete")
     fp = fingerprint(patches)
     current = f"{version} {fp} {tree_digest(sp, patches)}"
 
@@ -569,10 +548,11 @@ def main():
     except OSError:
         pass
     if old == current:
-        print(f"  {green('✓')} Audited vllm {version}: {len(patches)} patches in place in {duration(t0)}")
+        ui.done(f"Audited vllm {version}: {len(patches)} patches in place in {ui.dur(time.monotonic() - t0)}")
         return
 
     # --- decide what state the tree is in --------------------------------
+    ui.stage("Auditing the tree")
     reset = False
     verdicts = None
     parts = old.split() if old else []
@@ -582,7 +562,7 @@ def main():
     if old and len(parts) not in (2, 3):
         # a corrupted or foreign stamp says nothing we can act on:
         # re-audit the tree instead of resetting on its word
-        warn(f"the stamp is unreadable ({old[:40]!r} -- this script writes 3 fields) -- re-auditing")
+        ui.note(f"the stamp is unreadable ({old[:40]!r} -- this script writes 3 fields) -- re-auditing")
         old_v = old_fp = old_tree = None
     if old_v is not None and (old_v != version or old_fp != fp):
         why = []
@@ -590,75 +570,93 @@ def main():
             why.append(f"vllm {old_v} -> {version}")
         if old_fp != fp:
             why.append("the patch set changed")
-        print(f"  {red('×')} the stamp no longer matches ({', '.join(why) or 'unknown reason'})")
+        ui.note(f"the stamp no longer matches ({', '.join(why) or 'unknown reason'})")
         reset = True
     elif old_v is not None and old_tree is None:
-        warn("the stamp has no tree hash (an older version wrote it) -- re-auditing")
+        ui.note("the stamp has no tree hash (an older version wrote it) -- re-auditing")
     elif old_v is not None:
-        warn("the vllm tree changed since the last audit -- re-auditing")
-    if not reset and verdicts is None:
+        ui.note("the vllm tree changed since the last audit -- re-auditing")
+    if not reset:
+        p = ui.Progress(f"auditing {len(patches)} patches", total=2 * len(patches))
         mirror, mroot = make_mirror(sp)
         try:
-            verdicts, forward_ok = forward_chain(patches, mirror, apply_to=mirror)
+            verdicts, forward_ok = forward_chain(patches, mirror, apply_to=mirror, tick=p.tick)
         finally:
             shutil.rmtree(mroot, ignore_errors=True)
         if forward_ok:
-            pass  # fresh tree (or a crash between patches): apply the FRESH set below
-        elif reverse_cascade(patches, sp):
+            # fresh tree (or a crash between patches): apply the FRESH set below
+            n_fresh = sum(1 for q in patches if verdicts[q.name] == FRESH)
+            p.finish(True, f"audit: {n_fresh} fresh, {len(patches) - n_fresh} already applied")
+        elif reverse_cascade(patches, sp, tick=p.tick):
             # fully patched: the per-patch verdicts above are unreliable
             # (overlapping patches cannot be judged individually against
             # the final state) -- the cascade proves the whole set is in
-            verdicts = {p.name: APPLIED for p in patches}
+            verdicts = {q.name: APPLIED for q in patches}
+            p.finish(True, f"audit: all {len(patches)} patches already applied")
         else:
-            print(dim("  the venv is neither fully patched nor cleanly forward-applicable"))
-            print(dim("  (probably interrupted mid-patch, or hand-edited)"))
+            p.finish(False, "audit: the tree is neither fully patched nor cleanly forward-applicable (interrupted mid-patch, or hand-edited)")
             reset = True
 
     if reset:
+        ui.stage(f"Resetting vllm {version}")
+        t_r = time.monotonic()
         reinstall(version)
         clean_junk(sp)
+        ui.ok(f"vllm {version} reinstalled pristine in {ui.dur(time.monotonic() - t_r)}")
+        p = ui.Progress(f"verifying {len(patches)} patches against the pristine tree", total=len(patches))
+        failures = {}
         mirror, mroot = make_mirror(sp)  # mirror the freshly reinstalled tree
         try:
-            verdicts, forward_ok = forward_chain(patches, mirror, apply_to=mirror)
+            verdicts, forward_ok = forward_chain(patches, mirror, apply_to=mirror, tick=p.tick, failures=failures)
         finally:
             shutil.rmtree(mroot, ignore_errors=True)
         if not forward_ok:
-            bad = next((p for p in patches if verdicts[p.name] == CONFLICT), patches[-1])
-            err(f"{bad.stem} fails even against pristine vllm {version}",
-                "the patch does not match this vllm release -- rebase it against the pinned one",
-                "the venv now holds pristine, unpatched vllm: it will not serve until that is fixed",
-                f"re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}")
+            bad = next((q for q in patches if verdicts[q.name] == CONFLICT), patches[-1])
+            p.finish(False, f"{bad.stem} fails even against pristine vllm {version}",
+                     *failures.get(bad.name, []),
+                     "the patch does not match this vllm release -- rebase it against the pinned one",
+                     "the venv now holds pristine, unpatched vllm: it will not serve until that is fixed",
+                     f"re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}",
+                     fatal=True)
 
     # --- apply (or confirm) ---------------------------------------------
+    n_fresh = sum(1 for q in patches if verdicts[q.name] == FRESH)
+    if n_fresh:
+        ui.stage(f"Applying {n_fresh} of {len(patches)} patches")
     n_applied = 0
-    for p in patches:
-        v = verdicts[p.name]
+    for q in patches:
+        v = verdicts[q.name]
         if v == APPLIED:
-            print(f"  {dim('·')} {p.stem} {dim('(already applied)')}")
+            ui.note(f"{q.stem} (already applied)")
             continue
         if v != FRESH:
-            err(f"{p.stem} could not be applied (no clean direction found)",
-                "re-run, or recreate the venv if it keeps happening")
+            ui.fail(f"{q.stem} could not be applied (no clean direction found)",
+                    "re-run, or recreate the venv if it keeps happening")
         # the verdicts came from a mirror; confirm against the real tree
         # so a change made since the audit (by a second run, a human, or
         # another tool) cannot be written over -- the next run converges
-        if classify(p, sp) != FRESH:
-            err(f"{p.stem}: the tree changed under us since the audit",
-                "re-run -- it converges from the current state")
-        if apply_real(p, sp).returncode != 0:
-            err(f"{p.stem} failed on the real apply after a clean dry-run",
-                "the tree changed under us -- re-run",
-                f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
-        print(f"  {green('+')} {p.stem}")
+        if classify(q, sp) != FRESH:
+            ui.fail(f"{q.stem}: the tree changed under us since the audit",
+                    "re-run -- it converges from the current state")
+        r = apply_real(q, sp)
+        if r.returncode != 0:
+            ui.fail(f"{q.stem} failed on the real apply after a clean dry-run",
+                    *_output_tail(r),
+                    "the tree changed under us -- re-run",
+                    f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
+        ui.ok(q.stem)
         n_applied += 1
 
     clean_junk(sp)
+    p = ui.Progress("compiling the patched tree")
+    t_c = time.monotonic()
     r = subprocess.run([str(PY), "-m", "compileall", "-q", str(sp)])
     if r.returncode != 0:
-        err("the patched tree does not compile -- vLLM is broken, do not run it",
-            f"reset vllm and re-run:  uv pip install --python {PY} --force-reinstall --no-deps vllm=={version.split('+')[0]} && {PY} {REPO / 'prepare' / 'patch_vllm.py'}",
-            f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
-    print(f"  {green('✓')} patched tree compiles")
+        p.finish(False, "the patched tree does not compile -- vLLM is broken, do not run it",
+                 f"reset vllm and re-run:  uv pip install --python {PY} --force-reinstall --no-deps vllm=={version.split('+')[0]} && {PY} {REPO / 'prepare' / 'patch_vllm.py'}",
+                 f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
+                 fatal=True)
+    ui.ok(f"patched tree compiles in {ui.dur(time.monotonic() - t_c)}")
 
     # stamp the state as it is now, not the start-of-run digest (which
     # predates this run's own applies on a fresh venv)
@@ -668,14 +666,15 @@ def main():
     except OSError as e:
         # the tree is patched and compiled; only the attestation is
         # missing, so the next run re-audits instead of failing
-        err(f"could not write {STAMP} ({e})",
-            "the venv is patched and compiles; fix the venv permissions and re-run to stamp it")
+        ui.fail(f"could not write {STAMP} ({e})",
+               "the venv is patched and compiles; fix the venv permissions and re-run to stamp it")
+    elapsed = ui.dur(time.monotonic() - t0)
     if reset:
-        print(f"  {green('✓')} vllm {version} reinstalled, {n_applied} of {len(patches)} patches applied in {duration(t0)}")
+        ui.done(f"vllm {version} reinstalled, {n_applied} of {len(patches)} patches applied in {elapsed}")
     elif n_applied:
-        print(f"  {green('✓')} {n_applied} patches applied in {duration(t0)}")
+        ui.done(f"{n_applied} patches applied in {elapsed}")
     else:
-        print(f"  {green('✓')} Audited vllm {version}: {len(patches)} patches in place in {duration(t0)}")
+        ui.done(f"Audited vllm {version}: {len(patches)} patches in place in {elapsed}")
 
 
 if __name__ == "__main__":

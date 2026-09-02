@@ -8,4 +8,8 @@ cd /app
 export PATH=/app/.venv/bin:$PATH
 python prepare/build_fast_model.py /app/models/Qwen3.8-27B-W4A16-AutoRound-fast
 python prepare/fetch_dflash2.py /app/models/Qwen3.8-27B-DFlash2-W4A16
-echo "prepare: models ready under /app/models"
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  printf '  \033[32m✓\033[0m models ready under /app/models\n'
+else
+  echo "  ✓ models ready under /app/models"
+fi

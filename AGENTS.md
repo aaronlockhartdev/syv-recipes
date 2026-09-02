@@ -65,8 +65,12 @@ combination is new to the matrix).
   inlined in the one `exec vllm serve` line; env vars are only what the
   patch stack needs (and their defaults). No config branching. No comment
   lines inside backslash continuation chains.
-- **All scripts are idempotent** and print in uv's style (verb-led lines,
-  `+` / `·` / `×`, counts, elapsed time, TTY + NO_COLOR aware).
+- **All scripts are idempotent** and print in uv's style via the shared
+  `prepare/_ui.py`: verb-led lines, `+` / `·` / `×` markers, bold stage
+  headers that group their sub-lines, counts, elapsed time, and in-place
+  progress (uv-style bars for measured work, spinners for the rest) whose
+  finished or failed status overwrites the in-progress line; non-TTY output
+  degrades to one line per event. TTY + NO_COLOR aware.
 - **No unmeasured numbers**: the README matrix's measurement columns
   (decode, prefill 16k, quality) are the user's to fill on this hardware.
   Numbers taken from upstream are single-card or a different shape; they
@@ -78,7 +82,7 @@ combination is new to the matrix).
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
 recipes/ the five *.sh
-prepare/ build_fast_model.py, fetch_dflash2.py, patch_vllm.py
+prepare/ build_fast_model.py, fetch_dflash2.py, patch_vllm.py, _ui.py
 patches/ the 19 synced patches
 ```
 

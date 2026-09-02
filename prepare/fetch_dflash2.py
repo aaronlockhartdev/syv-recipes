@@ -14,56 +14,29 @@ import shutil
 import sys
 import time
 
-from huggingface_hub import snapshot_download
+import _ui as ui
 
 REPO = "syvai/Qwen3.8-27B-DFlash2-W4A16"
 FILES = ("config.json", "model.safetensors")
-
-TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-
-
-def c(code, s):
-    return f"\033[{code}m{s}\033[0m" if TTY else s
+_BAR_MIN = 8 << 20  # copies above this size run as a progress bar
 
 
-def dim(s):
-    print(c("2", s))
-
-
-def ok(s):
-    print(c("32", f"+ {s}"))
-
-
-def done(s):
-    print(c("32", f"\u2713 {s}"))
-
-
-def fail(msg, *hints):
-    print(c("31", f"\u00d7 {msg}"))
-    for h in hints:
-        print(c("2", f"  \u2570\u2500> {h}"))
-    sys.exit(1)
-
-
-def dur(t0):
-    d = int((time.monotonic() - t0) * 1000)
-    return f"{d}ms" if d < 1000 else f"{d / 1000:.1f}s"
-
-
-def human(n):
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if n < 1024 or unit == "GiB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-
-
-def _snapshot(repo):
-    # local-first: a warm cache resolves without any network (a blackholed
-    # network must not stall a model-ready boot); the first run downloads
-    try:
-        return snapshot_download(repo, local_files_only=True)
-    except Exception:
-        return snapshot_download(repo)
+def _copy(src, dstp, size):
+    """Copy one file into the destination; the big ones run as a bar."""
+    f = os.path.basename(src)
+    if size > _BAR_MIN:
+        p = ui.Progress(f"copying {f} ({ui.human(size)})", total=size)
+        with open(src, "rb") as a, open(dstp, "wb") as b:
+            while True:
+                chunk = a.read(1 << 20)
+                if not chunk:
+                    break
+                b.write(chunk)
+                p.tick(len(chunk))
+        p.finish(True, f"{f}: copied ({ui.human(size)})")
+    else:
+        shutil.copy(src, dstp)
+        ui.ok(f"{f}: copied ({ui.human(size)})")
 
 
 def main():
@@ -78,13 +51,17 @@ def main():
     dst = os.path.abspath(sys.argv[1])
     os.makedirs(dst, exist_ok=True)
 
-    dim(f"\u00b7 fetching {REPO}")
+    ui.stage(f"Fetching {REPO}")
+    p = ui.Progress(f"fetching {REPO}")
     try:
-        hub = _snapshot(REPO)
+        hub = ui.snapshot(REPO, progress=p)
     except Exception as e:
-        fail(f"cannot fetch {REPO} ({e!r})",
-             "check the network and Hugging Face reachability; once cached, re-runs are offline")
-    ok(f"{REPO} ({dur(t0)})")
+        p.finish(False, f"cannot fetch {REPO} ({e!r})",
+                 "check the network and Hugging Face reachability; once cached, re-runs are offline",
+                 fatal=True)
+    p.finish(True, f"{REPO} in {ui.dur(time.monotonic() - t0)}")
+
+    ui.stage(f"Installing {dst}")
     for f in FILES:
         src = os.path.realpath(os.path.join(hub, f))
         dstp = os.path.join(dst, f)
@@ -92,18 +69,16 @@ def main():
             continue
         if os.path.lexists(dstp):
             os.remove(dstp)
-        if f.endswith(".safetensors"):
-            size = human(os.path.getsize(src))
-            dim(f"\u00b7 copying {f} ({size})")
+        size = os.path.getsize(src)
         try:
             os.link(src, dstp)
-            method = "hard-linked"
         except OSError:
-            shutil.copy(src, dstp)  # cross-device
-            method = "copied"
-        ok(f"{f}: {method}" + (f" ({size})" if f.endswith(".safetensors") else ""))
-    done(f"DFlash2 drafter ready: {dst} ({dur(t0)})")
-    dim("  serve with: the dflash2-family recipes (this dir as DRAFT)")
+            _copy(src, dstp, size)
+            continue
+        ui.ok(f"{f}: hard-linked ({ui.human(size)})")
+
+    ui.done(f"DFlash2 drafter ready: {dst} ({ui.dur(time.monotonic() - t0)})")
+    ui.note("serve with: the dflash2-family recipes (this dir as DRAFT)")
 
 
 if __name__ == "__main__":

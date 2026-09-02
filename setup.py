@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO / "prepare"))  # _ui lives with the prep scripts
+import _ui as ui
 
 
 _SHELL_SPECIAL = frozenset(
@@ -70,44 +72,17 @@ DRAFT = Path(
 ).expanduser()
 PY = VENV / "bin" / "python"
 
-TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-
-
-def c(code, s):
-    return f"\033[{code}m{s}\033[0m" if TTY else s
-
-
-def dim(s):
-    print(c("2", s))
-
-
-def ok(s):
-    print(c("32", f"+ {s}"))
-
-
-def done(s):
-    print(c("32", f"\u2713 {s}"))
-
-
-def fail(label, *hints):
-    print(c("31", f"\u00d7 {label}"))
-    for h in hints:
-        print(c("2", f"  \u2570\u2500> {h}"))
-    sys.exit(1)
-
-
-def dur(t0):
-    d = int((time.monotonic() - t0) * 1000)
-    return f"{d}ms" if d < 1000 else f"{d / 1000:.1f}s"
 
 
 def run(label, cmd, *hints):
-    """Run a step inheriting stdio (children print their own lines).
-    Exit on failure with the step named; return the start time."""
+    """Stage a step: bold header, then the child does the work (the
+    children are uv-style too). Exit on failure with the step named;
+    return the start time."""
+    ui.stage(label)
     t0 = time.monotonic()
     r = subprocess.run([str(x) for x in cmd])
     if r.returncode != 0:
-        fail(f"{label} failed (exit {r.returncode})", *hints)
+        ui.fail(f"{label} failed (exit {r.returncode})", *hints)
     return t0
 
 
@@ -119,7 +94,7 @@ def main():
 
     uv = shutil.which("uv")
     if uv is None:
-        fail(
+        ui.fail(
             "uv is not on PATH",
             "install it:  curl -LsSf https://astral.sh/uv/install.sh | sh",
             "then put ~/.local/bin on your PATH:  "
@@ -127,7 +102,7 @@ def main():
         )
 
     if PY.is_file():
-        dim(f"\u00b7 venv {VENV} already present -- skipping")
+        ui.note(f"venv {VENV} already present -- skipping")
     else:
         VENV.parent.mkdir(parents=True, exist_ok=True)
         t0 = run(
@@ -136,8 +111,8 @@ def main():
             f"no python 3.12?  install one (e.g.  brew install python@3.12) and re-run",
         )
         if not PY.is_file():
-            fail(f"the venv at {VENV} has no python", f"delete it and re-run:  rm -rf {VENV}")
-        ok(f"venv {VENV} ({dur(t0)})")
+            ui.fail(f"the venv at {VENV} has no python", f"delete it and re-run:  rm -rf {VENV}")
+        ui.ok(f"venv {VENV} in {ui.dur(time.monotonic() - t0)}")
 
     run(
         "installing the pinned requirements",
@@ -166,7 +141,7 @@ def main():
         [PY, REPO / "prepare" / "fetch_dflash2.py", DRAFT],
     )
 
-    done(f"ready -- serve with:  bash {REPO / 'recipes' / 'w4a16-int8-dflash2.sh'}   (or any of recipes/)")
+    ui.done(f"ready -- serve with:  bash {REPO / 'recipes' / 'w4a16-int8-dflash2.sh'}   (or any of recipes/)")
 
 
 if __name__ == "__main__":

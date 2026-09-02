@@ -33,9 +33,10 @@ import time
 
 import torch
 from compressed_tensors.compressors.pack_quantized.base import pack_to_int32
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 from safetensors.torch import save_file
+import _ui as ui
 
 BASE_REPO = "dbirks/Qwen3.8-27B-W4A16-AutoRound"
 FAST_REPO = "syvai/qwen3.8-27b-3090-fast-variant"
@@ -55,43 +56,7 @@ OVERLAY = (
 EMBED_SHARD = "model-00006-of-00007.safetensors"
 
 GROUP, BITS, QMAX = 128, 8, 127
-
-TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-
-
-def c(code, s):
-    return f"\033[{code}m{s}\033[0m" if TTY else s
-
-
-def dim(s):
-    print(c("2", s))
-
-
-def ok(s):
-    print(c("32", f"+ {s}"))
-
-
-def done(s):
-    print(c("32", f"\u2713 {s}"))
-
-
-def fail(msg, *hints):
-    print(c("31", f"\u00d7 {msg}"))
-    for h in hints:
-        print(c("2", f"  \u2570\u2500> {h}"))
-    sys.exit(1)
-
-
-def dur(t0):
-    d = int((time.monotonic() - t0) * 1000)
-    return f"{d}ms" if d < 1000 else f"{d / 1000:.1f}s"
-
-
-def human(n):
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if n < 1024 or unit == "GiB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
+_BAR_MIN = 8 << 20  # copies above this size run as a progress bar
 
 
 def _shard_meta(path):
@@ -119,13 +84,11 @@ def safetensors_keys(path):
     return set(r[0].keys()) if r is not None else None
 
 
-def _snapshot(repo):
+def _snapshot(repo, progress=None):
     # local-first: a warm cache resolves without any network (a blackholed
-    # network must not stall a model-ready boot); the first run downloads
-    try:
-        return snapshot_download(repo, local_files_only=True)
-    except Exception:
-        return snapshot_download(repo)
+    # network must not stall a model-ready boot); the first run downloads,
+    # feeding progress
+    return ui.snapshot(repo, progress)
 
 
 def _template_path():
@@ -139,7 +102,7 @@ def _template_path():
     try:
         return hf_hub_download(TEMPLATE_REPO, TEMPLATE_FILE)
     except Exception as e:
-        dim(f"\u00b7 {TEMPLATE_FILE} unavailable from {TEMPLATE_REPO} ({e}); keeping the base chat template")
+        ui.note(f"{TEMPLATE_FILE} unavailable from {TEMPLATE_REPO} ({e}); keeping the base chat template")
         return None
 
 
@@ -159,8 +122,8 @@ def requant_embed(path, key):
     deq = (q.reshape(out_f, -1, GROUP).to(torch.float32) * scale).reshape(out_f, in_f)
     err = ((deq - w).norm() / w.norm()).item()
     if err >= 0.01:
-        fail(f"embed_tokens quantization error too high ({err:.4f} >= 0.01) -- aborting")
-    dim(f"  round-trip relative error: {err:.4f}")
+        ui.fail(f"embed_tokens quantization error too high ({err:.4f} >= 0.01) -- aborting")
+    ui.note(f"round-trip relative error: {err:.4f}")
     stem = key[: -len(".weight")]
     tensors[stem + ".weight_packed"] = pack_to_int32(q, BITS, packed_dim=1).contiguous()
     # the embedding path creates scales in params_dtype (bf16), unlike the linears
@@ -184,19 +147,25 @@ def template_ready(dst, tsrc):
     return file_ready(dst_t, tsrc)
 
 
-def install(dst_path, src_path, linkable):
-    """Put src at dst: hard-link where possible, copy otherwise. Never over
-    an existing file. Returns the method actually used."""
-    if os.path.lexists(dst_path):
-        os.remove(dst_path)
-    if linkable:
-        try:
-            os.link(src_path, dst_path)
-            return "hard-linked"
-        except OSError:
-            pass  # cross-device: copy
-    shutil.copy(src_path, dst_path)
-    return "copied"
+def _hardlink(src, dst):
+    try:
+        os.link(src, dst)
+        return True
+    except OSError:
+        return False  # cross-device: copy
+
+
+def _copy_progressed(src, dst, progress):
+    """A chunked copy feeding progress (1 MiB at a time), copystat at the
+    end. Replaces shutil.copy for the files big enough to bar."""
+    with open(src, "rb") as a, open(dst, "wb") as b:
+        while True:
+            chunk = a.read(1 << 20)
+            if not chunk:
+                break
+            b.write(chunk)
+            progress.tick(len(chunk))
+    shutil.copystat(src, dst)
 
 
 def complete(dst, fast_dir):
@@ -246,16 +215,16 @@ def verify_draft_vocab(model_dir):
             map_location="cpu", weights_only=True,
         )
     except Exception as e:
-        fail(f"draft-vocab .pt in {model_dir} is unreadable ({e!r})",
-             "re-fetch the fast-variant overlay")
+        ui.fail(f"draft-vocab .pt in {model_dir} is unreadable ({e!r})",
+                "re-fetch the fast-variant overlay")
     packed = "mtp.draft_lm_head.weight_packed"
     path = dst_idx.get("weight_map", {}).get(packed)
     meta = _shard_meta(os.path.join(model_dir, path)) if path else None
     rows = meta[0].get(packed, {}).get("shape", [None])[0] if meta else None
     if rows != len(ids):
-        fail(f"draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows",
-             "re-fetch the fast-variant overlay")
-    dim(f"  draft vocab: {len(ids)} ids == {rows}-row draft head")
+        ui.fail(f"draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows",
+                "re-fetch the fast-variant overlay")
+    ui.note(f"draft vocab: {len(ids)} ids == {rows}-row draft head")
 
 
 def main():
@@ -270,12 +239,23 @@ def main():
     dst = os.path.abspath(sys.argv[1])
     os.makedirs(dst, exist_ok=True)
 
-    dim(f"\u00b7 fetching {BASE_REPO}")
-    base = _snapshot(BASE_REPO)
-    ok(f"{BASE_REPO} ({dur(t0)})")
-    dim(f"\u00b7 fetching {FAST_REPO}")
-    fast = _snapshot(FAST_REPO)
-    ok(f"{FAST_REPO} ({dur(t0)})")
+    ui.stage("Fetching the model repos")
+    p = ui.Progress(f"fetching {BASE_REPO}")
+    try:
+        base = _snapshot(BASE_REPO, progress=p)
+    except Exception as e:
+        p.finish(False, f"cannot fetch {BASE_REPO} ({e!r})",
+                 "check the network and Hugging Face reachability; once cached, re-runs are offline",
+                 fatal=True)
+    p.finish(True, f"{BASE_REPO} in {ui.dur(time.monotonic() - t0)}")
+    p = ui.Progress(f"fetching {FAST_REPO}")
+    try:
+        fast = _snapshot(FAST_REPO, progress=p)
+    except Exception as e:
+        p.finish(False, f"cannot fetch {FAST_REPO} ({e!r})",
+                 "check the network and Hugging Face reachability; once cached, re-runs are offline",
+                 fatal=True)
+    p.finish(True, f"{FAST_REPO} in {ui.dur(time.monotonic() - t0)}")
     tsrc = _template_path()
     # fail fast: a bad download or an unexpected overlay layout costs
     # seconds here instead of a full copy + requant build
@@ -285,11 +265,32 @@ def main():
         # dirs built before this check existed (or hit by in-place corruption
         # after a good run) are only caught here
         verify_draft_vocab(dst)
-        done(f"fast model already complete: {dst} ({dur(t0)})")
+        ui.done(f"fast model already complete: {dst} ({ui.dur(time.monotonic() - t0)})")
         return
 
+    ui.stage(f"Assembling {dst}")
     base_idx = json.load(open(os.path.join(base, "model.safetensors.index.json")))
     embed_key = next(k for k in base_idx["weight_map"] if k.endswith("embed_tokens.weight"))
+
+    def place(f, src, linkable):
+        """One file into dst: hard-link where allowed, copied otherwise;
+        copies above _BAR_MIN run as a progress bar."""
+        dstp = os.path.join(dst, f)
+        if file_ready(dstp, src):
+            return
+        if os.path.lexists(dstp):
+            os.remove(dstp)
+        size = os.path.getsize(src)
+        if linkable and _hardlink(src, dstp):
+            ui.ok(f"{f}: hard-linked ({ui.human(size)})")
+            return
+        if size > _BAR_MIN:
+            p = ui.Progress(f"copying {f} ({ui.human(size)})", total=size)
+            _copy_progressed(src, dstp, p)
+            p.finish(True, f"{f}: copied ({ui.human(size)})")
+        else:
+            shutil.copy(src, dstp)
+            ui.ok(f"{f}: copied ({ui.human(size)})")
 
     embed_done = False
     if os.path.isfile(os.path.join(dst, EMBED_SHARD)):
@@ -300,50 +301,29 @@ def main():
         if f in (".gitattributes",) or f in OVERLAY or (f == TEMPLATE_FILE and tsrc is not None):
             continue  # the Qwen-Sharp template is installed separately below
         src = os.path.realpath(os.path.join(base, f))
-        dstp = os.path.join(dst, f)
         if f == EMBED_SHARD:
             if embed_done:
                 continue
-            size = human(os.path.getsize(src))
-            dim(f"\u00b7 copying {f} ({size})")
-            install(dstp, src, linkable=False)
-            dim(f"\u00b7 requantizing embed_tokens to int8 (the only local step)")
+            # copy, never link: in-place edits must not write through into
+            # the shared HF cache
+            place(f, src, linkable=False)
+            q = ui.Progress("requantizing embed_tokens to int8 (the only local step)")
             t1 = time.monotonic()
-            requant_embed(dstp, embed_key)
-            ok(f"{f}: embed_tokens requantized to int8 group-128 ({dur(t1)})")
-        elif file_ready(dstp, src):
-            continue
-        elif f.endswith(".safetensors"):
-            size = human(os.path.getsize(src))
-            dim(f"\u00b7 copying {f} ({size})")
-            method = install(dstp, src, linkable=True)
-            ok(f"{f}: {method} ({size})")
+            requant_embed(os.path.join(dst, f), embed_key)
+            q.finish(True, f"{f}: embed_tokens requantized to int8 group-128 in {ui.dur(time.monotonic() - t1)}")
         else:
-            ok(f"{f}: {install(dstp, src, linkable=True)}")
+            place(f, src, linkable=True)
 
     for f in OVERLAY:
-        src = os.path.realpath(os.path.join(fast, f))
-        dstp = os.path.join(dst, f)
-        if file_ready(dstp, src):
-            continue
-        if f.endswith(".safetensors"):
-            size = human(os.path.getsize(src))
-            dim(f"\u00b7 copying {f} ({size})")
-            method = install(dstp, src, linkable=True)
-            ok(f"{f}: {method} ({size})")
-        else:
-            ok(f"{f}: {install(dstp, src, linkable=True)}")
+        place(f, os.path.realpath(os.path.join(fast, f)), linkable=True)
 
     if tsrc is not None:
-        dst_t = os.path.join(dst, TEMPLATE_FILE)
-        if not file_ready(dst_t, tsrc):
-            ok(f"{TEMPLATE_FILE}: Qwen-Sharp template ({TEMPLATE_REPO})")
-            install(dst_t, os.path.realpath(tsrc), linkable=False)
+        place(TEMPLATE_FILE, os.path.realpath(tsrc), linkable=False)
 
     assert complete(dst, fast), "assembly finished but the completeness check still fails"
     verify_draft_vocab(dst)
-    done(f"fast model ready: {dst} ({dur(t0)})")
-    dim("  serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
+    ui.done(f"fast model ready: {dst} ({ui.dur(time.monotonic() - t0)})")
+    ui.note("serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
 
 
 if __name__ == "__main__":
