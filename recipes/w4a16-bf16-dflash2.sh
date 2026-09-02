@@ -8,8 +8,8 @@
 # CUDA-graph capture is safe with it (all 128 prefix-cache residues swept
 # clean), so this recipe does not force PIECEWISE like w4a16-int8-mtp does.
 #
-# The trade vs w4a16-int8-dflash2: bf16 KV is 2x the bytes of int8, so
-# pool holds ~half the context, and prefill is slower (FA2, no int8 KV path).
+# The trade vs w4a16-int8-dflash2: bf16 KV is 2x the bytes of int8, so the
+# same VRAM pool holds ~half the context, and prefill is slower (FA2, no int8 KV path).
 # It is the quality baseline -- no quantized-KV approximation anywhere.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

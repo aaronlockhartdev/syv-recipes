@@ -7,7 +7,8 @@
 # MTP module on W4A16, where W8A8 is unsupported). Prefill is compute-
 # bound at every concurrency, so the int8 tensor-core GEMMs buy prefill
 # speed; decode is memory-bound and unchanged. Upstream measured this on
-# the dflash2 stack (seeded, prefix caching; their INT8 lane is bf16 KV):
+# the dflash2 stack (seeded, prefix caching; their single-user INT8 lane
+# is bf16 KV):
 #
 #   prefill tok/s            1k      4k      16k     51k
 #   W4A16 (baseline)       1,437   1,494   1,410   1,200

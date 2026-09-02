@@ -192,18 +192,26 @@ def complete(dst, fast_dir):
     return True
 
 
-def verify_draft_vocab(dst):
-    """The draft-vocab .pt and the draft head it feeds must agree
-    row-for-row: isfile alone passes a truncated .pt, which then dies at
-    server boot when the MTP patch torch.loads it."""
-    dst_idx = json.load(open(os.path.join(dst, "model.safetensors.index.json")))
-    ids = torch.load(
-        os.path.join(dst, "mtp_draft_vocab_ids.pt"),
-        map_location="cpu", weights_only=True,
-    )
+def verify_draft_vocab(model_dir):
+    """The draft-vocab .pt and the packed head it feeds must agree in size:
+    the .pt's id count equals the head's row count (both 40960 in the
+    published variant). isfile alone passes a truncated .pt, which then dies
+    at server boot when the MTP draft-vocab patch torch.loads it. Compares
+    the count only -- the ids have no second source of truth; a same-count
+    file with different ids passes here but degrades draft acceptance."""
+    try:
+        dst_idx = json.load(open(os.path.join(model_dir, "model.safetensors.index.json")))
+        ids = torch.load(
+            os.path.join(model_dir, "mtp_draft_vocab_ids.pt"),
+            map_location="cpu", weights_only=True,
+        )
+    except Exception as e:
+        sys.exit(f"draft-vocab .pt in {model_dir} is unreadable ({e!r}) -- "
+                 "re-fetch the fast-variant overlay")
     packed = "mtp.draft_lm_head.weight_packed"
-    meta = _shard_meta(os.path.join(dst, dst_idx["weight_map"][packed]))
-    rows = meta[0][packed]["shape"][0] if meta else None
+    path = dst_idx.get("weight_map", {}).get(packed)
+    meta = _shard_meta(os.path.join(model_dir, path)) if path else None
+    rows = meta[0].get(packed, {}).get("shape", [None])[0] if meta else None
     assert rows == len(ids), (
         f"draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows -- "
         "re-fetch the fast-variant overlay"
@@ -222,8 +230,14 @@ def main():
     print(f"== HF cache: {FAST_REPO}")
     fast = _snapshot(FAST_REPO)
     tsrc = _template_path()
+    # fail fast: a bad download or an unexpected overlay layout costs
+    # seconds here instead of a full copy + requant build
+    verify_draft_vocab(fast)
 
     if complete(dst, fast) and template_ready(dst, tsrc):
+        # dirs built before this check existed (or hit by in-place corruption
+        # after a good run) are only caught here
+        verify_draft_vocab(dst)
         print("fast model already complete:", dst)
         return
 
