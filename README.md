@@ -72,8 +72,8 @@ on prefix-cache hits).
 ```
 Dockerfile          uv + pinned vLLM 0.27.1 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
-setup.sh            bare-metal one-shot: venv, deps, patches, model prep
-patch_vllm.py       applies patches/ to the installed vllm; idempotent, stamps the venv
+setup.py            bare-metal one-shot: venv, deps, patches, model prep
+patch_vllm.py       applies patches/ to the installed vllm; idempotent, stamps the venv; runs standalone (re-execs into the venv's python)
 recipes/            the five serve configurations
 prepare/            build_fast_model.py, fetch_dflash2.py — one-time model prep
 patches/            the 19 vLLM patches (below)
@@ -115,11 +115,11 @@ fall back to a full copy.
 ## Bare metal (uv)
 
 ```bash
-bash setup.sh            # venv + pinned deps + the 19 patches + both models
+./setup.py             # venv + pinned deps + the 19 patches + both models
 bash recipes/w4a16-int8-dflash2.sh  # or any of the other four
 ```
 
-`setup.sh` is idempotent — re-run it any time; it is also the recovery
+`setup.py` is idempotent — re-run it any time; it is also the recovery
 path after a venv wipe. `patch_vllm.py` converges whatever state it
 finds: a stamped venv whose vllm version, hash of `patches/`, and hash of the files the patches touch
 all still match is a fast "Audited … in place" no-op; a fully patched but
@@ -136,11 +136,11 @@ env vars of the same names the recipes use (defaults: `.venv`,
 between setup and serve:
 
 ```bash
-MODEL=/data/qwen VENV=/data/qwen/.venv bash setup.sh
+MODEL=/data/qwen VENV=/data/qwen/.venv ./setup.py
 MODEL=/data/qwen bash recipes/w4a16-int8-dflash2.sh
 ```
 
-What `setup.sh` runs, in order, if you'd rather do it by hand (install uv
+What `setup.py` runs, in order, if you'd rather do it by hand (install uv
 first, and GNU `patch` if your distro lacks it:
 `curl -LsSf https://astral.sh/uv/install.sh | sh`):
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Idempotently apply the repo's patch set to the vLLM in a venv.
 
-Run it with the venv's own interpreter (it must be able to find vllm
-there):
+Can be run standalone: invoked under any other interpreter it
+re-execs into the venv's own (the one that can find vllm):
 
-    .venv/bin/python patch_vllm.py        # VENV=/path overrides ./.venv
+    ./patch_vllm.py                # or: .venv/bin/python patch_vllm.py
+
+    VENV=/path overrides the default ./.venv
 
 After a successful run the venv is stamped (.venv/.vllm-patch-stamp)
 with the vllm version, a hash of patches/, and a hash of the tree the
@@ -447,8 +449,8 @@ def reinstall(version):
             "one time:  curl -LsSf https://astral.sh/uv/install.sh | sh")
     print(dim(f"  reinstalling vllm {version} pristine (uv, from its cache)"))
     # uv resolves the pin against its index (PyPI by default): this venv
-    # was created from requirements.txt by setup.sh, so that is the same
-    # distribution the venv already holds
+    # was created from requirements.txt (by setup.py or the Dockerfile),
+    # so that is the same distribution the venv already holds
     pin = f"vllm=={version.split('+')[0]}"  # drop the local tag: uv re-resolves the platform wheel
     r = subprocess.run(["uv", "pip", "install", "--python", str(PY),
                         "--force-reinstall", "--no-deps", pin])
@@ -463,6 +465,24 @@ def main():
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
         pass
+
+    # self-bootstrap: a bare ./patch_vllm.py arrives via the shebang's
+    # generic interpreter; re-exec under the venv's own python (the one
+    # with vllm installed). sys.prefix equals the venv's only when the
+    # process was actually started through it. Bounded to one hop by the
+    # env marker, so a VENV that is not a real venv cannot loop
+    if (
+        os.environ.get("VENV_PV_REEXEC") != "1"
+        and PY.is_file()
+        and os.path.realpath(sys.prefix) != os.path.realpath(VENV)
+    ):
+        os.environ["VENV_PV_REEXEC"] = "1"
+        try:
+            os.execv(str(PY), [str(PY), os.path.abspath(__file__)] + sys.argv[1:])
+        except OSError as e:
+            err(f"cannot exec the venv's python at {PY}",
+                f"it exists but {e.strerror or 'the exec failed'} -- check its permissions, or recreate the venv")
+
     t0 = time.monotonic()
 
     if not PY.is_file():
