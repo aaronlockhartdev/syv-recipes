@@ -4,7 +4,7 @@
 Can be run standalone: invoked under any other interpreter it
 re-execs into the venv's own (the one that can find vllm):
 
-    ./patch_vllm.py                # or: .venv/bin/python patch_vllm.py
+    ./prepare/patch_vllm.py      # or: .venv/bin/python prepare/patch_vllm.py
 
     VENV=/path overrides the default ./.venv
 
@@ -74,7 +74,7 @@ try:
 except ImportError:  # non-POSIX: skip the run lock rather than crash
     _flock = None
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent  # this script lives in prepare/
 VENV = Path(os.environ.get("VENV") or REPO / ".venv")
 PY = VENV / "bin" / "python"
 STAMP = VENV / ".vllm-patch-stamp"
@@ -457,7 +457,7 @@ def reinstall(version):
     if r.returncode != 0:
         err(f"uv could not reinstall vllm=={version}",
             f"the venv may now hold a broken vllm -- recreate it:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
-            f"then re-run:  {PY} {REPO / 'patch_vllm.py'}")
+            f"then re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}")
 
 
 def main():
@@ -466,7 +466,7 @@ def main():
     except Exception:
         pass
 
-    # self-bootstrap: a bare ./patch_vllm.py arrives via the shebang's
+    # self-bootstrap: a bare ./prepare/patch_vllm.py arrives via the shebang's
     # generic interpreter; re-exec under the venv's own python (the one
     # with vllm installed). sys.prefix equals the venv's only when the
     # process was actually started through it. Bounded to one hop by the
@@ -586,7 +586,7 @@ def main():
             err(f"{bad.stem} fails even against pristine vllm {version}",
                 "the patch does not match this vllm release -- rebase it against the pinned one",
                 "the venv now holds pristine, unpatched vllm: it will not serve until that is fixed",
-                f"re-run:  {PY} {REPO / 'patch_vllm.py'}")
+                f"re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}")
 
     # --- apply (or confirm) ---------------------------------------------
     n_applied = 0
@@ -615,7 +615,7 @@ def main():
     r = subprocess.run([str(PY), "-m", "compileall", "-q", str(sp)])
     if r.returncode != 0:
         err("the patched tree does not compile -- vLLM is broken, do not run it",
-            f"reset vllm and re-run:  uv pip install --python {PY} --force-reinstall --no-deps vllm=={version.split('+')[0]} && {PY} {REPO / 'patch_vllm.py'}",
+            f"reset vllm and re-run:  uv pip install --python {PY} --force-reinstall --no-deps vllm=={version.split('+')[0]} && {PY} {REPO / 'prepare' / 'patch_vllm.py'}",
             f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
     print(f"  {green('✓')} patched tree compiles")
 

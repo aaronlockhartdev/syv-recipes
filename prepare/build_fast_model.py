@@ -24,12 +24,12 @@ Idempotent and resumable: a complete DEST_DIR is left alone, an interrupted
 one is repaired on the next run, and nothing is ever written into the shared
 HF cache.
 """
-
 import json
 import os
 import shutil
 import struct
 import sys
+import time
 
 import torch
 from compressed_tensors.compressors.pack_quantized.base import pack_to_int32
@@ -55,6 +55,43 @@ OVERLAY = (
 EMBED_SHARD = "model-00006-of-00007.safetensors"
 
 GROUP, BITS, QMAX = 128, 8, 127
+
+TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+def dim(s):
+    print(c("2", s))
+
+
+def ok(s):
+    print(c("32", f"+ {s}"))
+
+
+def done(s):
+    print(c("32", f"\u2713 {s}"))
+
+
+def fail(msg, *hints):
+    print(c("31", f"\u00d7 {msg}"))
+    for h in hints:
+        print(c("2", f"  \u2570\u2500> {h}"))
+    sys.exit(1)
+
+
+def dur(t0):
+    d = int((time.monotonic() - t0) * 1000)
+    return f"{d}ms" if d < 1000 else f"{d / 1000:.1f}s"
+
+
+def human(n):
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024 or unit == "GiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
 
 
 def _shard_meta(path):
@@ -102,7 +139,7 @@ def _template_path():
     try:
         return hf_hub_download(TEMPLATE_REPO, TEMPLATE_FILE)
     except Exception as e:
-        print(f"  (Qwen-Sharp template unavailable: {e}; keeping the base chat template)")
+        dim(f"\u00b7 {TEMPLATE_FILE} unavailable from {TEMPLATE_REPO} ({e}); keeping the base chat template")
         return None
 
 
@@ -121,8 +158,9 @@ def requant_embed(path, key):
     q = q.reshape(out_f, in_f)
     deq = (q.reshape(out_f, -1, GROUP).to(torch.float32) * scale).reshape(out_f, in_f)
     err = ((deq - w).norm() / w.norm()).item()
-    print(f"  embed round-trip relative error: {err:.4f}")
-    assert err < 0.01, "quantization error too high, aborting"
+    if err >= 0.01:
+        fail(f"embed_tokens quantization error too high ({err:.4f} >= 0.01) -- aborting")
+    dim(f"  round-trip relative error: {err:.4f}")
     stem = key[: -len(".weight")]
     tensors[stem + ".weight_packed"] = pack_to_int32(q, BITS, packed_dim=1).contiguous()
     # the embedding path creates scales in params_dtype (bf16), unlike the linears
@@ -147,16 +185,18 @@ def template_ready(dst, tsrc):
 
 
 def install(dst_path, src_path, linkable):
-    """Put src at dst: hard-link where possible, copy otherwise. Never over an existing file."""
+    """Put src at dst: hard-link where possible, copy otherwise. Never over
+    an existing file. Returns the method actually used."""
     if os.path.lexists(dst_path):
         os.remove(dst_path)
     if linkable:
         try:
             os.link(src_path, dst_path)
-            return
+            return "hard-linked"
         except OSError:
             pass  # cross-device: copy
     shutil.copy(src_path, dst_path)
+    return "copied"
 
 
 def complete(dst, fast_dir):
@@ -206,29 +246,36 @@ def verify_draft_vocab(model_dir):
             map_location="cpu", weights_only=True,
         )
     except Exception as e:
-        sys.exit(f"draft-vocab .pt in {model_dir} is unreadable ({e!r}) -- "
-                 "re-fetch the fast-variant overlay")
+        fail(f"draft-vocab .pt in {model_dir} is unreadable ({e!r})",
+             "re-fetch the fast-variant overlay")
     packed = "mtp.draft_lm_head.weight_packed"
     path = dst_idx.get("weight_map", {}).get(packed)
     meta = _shard_meta(os.path.join(model_dir, path)) if path else None
     rows = meta[0].get(packed, {}).get("shape", [None])[0] if meta else None
-    assert rows == len(ids), (
-        f"draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows -- "
-        "re-fetch the fast-variant overlay"
-    )
-    print(f"  draft vocab: {len(ids)} ids == {rows}-row draft head")
+    if rows != len(ids):
+        fail(f"draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows",
+             "re-fetch the fast-variant overlay")
+    dim(f"  draft vocab: {len(ids)} ids == {rows}-row draft head")
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    t0 = time.monotonic()
+
     if len(sys.argv) != 2 or not sys.argv[1].strip():
         sys.exit("usage: python prepare/build_fast_model.py DEST_DIR")
     dst = os.path.abspath(sys.argv[1])
     os.makedirs(dst, exist_ok=True)
 
-    print(f"== HF cache: {BASE_REPO}")
+    dim(f"\u00b7 fetching {BASE_REPO}")
     base = _snapshot(BASE_REPO)
-    print(f"== HF cache: {FAST_REPO}")
+    ok(f"{BASE_REPO} ({dur(t0)})")
+    dim(f"\u00b7 fetching {FAST_REPO}")
     fast = _snapshot(FAST_REPO)
+    ok(f"{FAST_REPO} ({dur(t0)})")
     tsrc = _template_path()
     # fail fast: a bad download or an unexpected overlay layout costs
     # seconds here instead of a full copy + requant build
@@ -238,7 +285,7 @@ def main():
         # dirs built before this check existed (or hit by in-place corruption
         # after a good run) are only caught here
         verify_draft_vocab(dst)
-        print("fast model already complete:", dst)
+        done(f"fast model already complete: {dst} ({dur(t0)})")
         return
 
     base_idx = json.load(open(os.path.join(base, "model.safetensors.index.json")))
@@ -250,40 +297,53 @@ def main():
         embed_done = bool(keys) and (embed_key[: -len(".weight")] + ".weight_packed" in keys)
 
     for f in sorted(os.listdir(base)):
-        if f in (".gitattributes",) or f in OVERLAY:
-            continue
+        if f in (".gitattributes",) or f in OVERLAY or (f == TEMPLATE_FILE and tsrc is not None):
+            continue  # the Qwen-Sharp template is installed separately below
         src = os.path.realpath(os.path.join(base, f))
         dstp = os.path.join(dst, f)
         if f == EMBED_SHARD:
             if embed_done:
                 continue
-            print(f"== {f}: copy + requantize embed_tokens to int8 (the only local step)")
+            size = human(os.path.getsize(src))
+            dim(f"\u00b7 copying {f} ({size})")
             install(dstp, src, linkable=False)
+            dim(f"\u00b7 requantizing embed_tokens to int8 (the only local step)")
+            t1 = time.monotonic()
             requant_embed(dstp, embed_key)
+            ok(f"{f}: embed_tokens requantized to int8 group-128 ({dur(t1)})")
         elif file_ready(dstp, src):
             continue
+        elif f.endswith(".safetensors"):
+            size = human(os.path.getsize(src))
+            dim(f"\u00b7 copying {f} ({size})")
+            method = install(dstp, src, linkable=True)
+            ok(f"{f}: {method} ({size})")
         else:
-            print(f"== {f}: {'link' if f.endswith(('.safetensors',)) else 'copy'} from cache")
-            install(dstp, src, linkable=True)
+            ok(f"{f}: {install(dstp, src, linkable=True)}")
 
     for f in OVERLAY:
         src = os.path.realpath(os.path.join(fast, f))
         dstp = os.path.join(dst, f)
         if file_ready(dstp, src):
             continue
-        print(f"== {f}: fast-variant overlay")
-        install(dstp, src, linkable=True)
+        if f.endswith(".safetensors"):
+            size = human(os.path.getsize(src))
+            dim(f"\u00b7 copying {f} ({size})")
+            method = install(dstp, src, linkable=True)
+            ok(f"{f}: {method} ({size})")
+        else:
+            ok(f"{f}: {install(dstp, src, linkable=True)}")
 
     if tsrc is not None:
         dst_t = os.path.join(dst, TEMPLATE_FILE)
         if not file_ready(dst_t, tsrc):
-            print(f"== {TEMPLATE_FILE}: Qwen-Sharp template ({TEMPLATE_REPO})")
+            ok(f"{TEMPLATE_FILE}: Qwen-Sharp template ({TEMPLATE_REPO})")
             install(dst_t, os.path.realpath(tsrc), linkable=False)
 
     assert complete(dst, fast), "assembly finished but the completeness check still fails"
     verify_draft_vocab(dst)
-    print("fast model ready:", dst)
-    print("serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
+    done(f"fast model ready: {dst} ({dur(t0)})")
+    dim("  serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
 
 
 if __name__ == "__main__":

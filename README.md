@@ -73,9 +73,8 @@ on prefix-cache hits).
 Dockerfile          uv + pinned vLLM 0.27.1 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
 setup.py            bare-metal one-shot: venv, deps, patches, model prep
-patch_vllm.py       applies patches/ to the installed vllm; idempotent, stamps the venv; runs standalone (re-execs into the venv's python)
 recipes/            the five serve configurations
-prepare/            build_fast_model.py, fetch_dflash2.py — one-time model prep
+prepare/            build_fast_model.py, fetch_dflash2.py, patch_vllm.py -- model prep + idempotent patching (runs standalone)
 patches/            the 19 vLLM patches (below)
 docker/             entrypoint.sh, prepare.sh
 ```
@@ -147,7 +146,7 @@ first, and GNU `patch` if your distro lacks it:
 ```bash
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements.txt
-.venv/bin/python patch_vllm.py
+.venv/bin/python prepare/patch_vllm.py
 .venv/bin/python prepare/build_fast_model.py models/Qwen3.8-27B-W4A16-AutoRound-fast
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 ```

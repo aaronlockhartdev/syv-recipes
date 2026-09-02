@@ -1,6 +1,6 @@
 # prepare/ — one-time model preparation
 
-Both scripts take a **mandatory destination directory** and download
+The two prep scripts take a **mandatory destination directory** and download
 through Hugging Face's built-in cache, so reruns and container rebuilds
 never re-download.
 
@@ -17,6 +17,9 @@ python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
   template (`peculiar-ragdoll/Qwen-Sharp-Chat-Templates`). Idempotent,
   resumable, ~8 GB peak RAM.
 - **fetch_dflash2.py** — the W4A16 DFlash2 block drafter (~1.2 GB).
+- **patch_vllm.py** — applies `patches/` to the venv's vllm; idempotent and
+  stamped (`VENV` env, default `./.venv`); runs standalone -- a bare
+  `./prepare/patch_vllm.py` re-execs into the venv's python.
 
 In the container `docker/prepare.sh` runs both into `/app/models`
 automatically before either recipe starts.

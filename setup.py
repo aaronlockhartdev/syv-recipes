@@ -107,7 +107,7 @@ def main():
 
     run(
         "patching vllm",
-        [PY, REPO / "patch_vllm.py"],
+        [PY, REPO / "prepare" / "patch_vllm.py"],
         "the venv is left as found; re-run to converge, or reset it:  "
         "uv pip install --force-reinstall --no-deps vllm==0.27.1",
     )
