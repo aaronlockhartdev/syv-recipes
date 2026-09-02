@@ -12,7 +12,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV=${VENV:-$DIR/.venv}
 MODEL=${MODEL:-$DIR/models/Qwen3.8-27B-W4A16-AutoRound-fast}
 DRAFT=${DRAFT:-$DIR/models/Qwen3.8-27B-DFlash2-W4A16}
-export VENV   # patch-vllm.sh reads the same name
+export VENV   # patch_vllm.py reads the same name
 
 command -v uv >/dev/null || {
   echo "uv is not installed -- one time:  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
@@ -27,8 +27,8 @@ fi
 echo "== uv pip install -r requirements.txt"
 uv pip install --python "$VENV/bin/python" -r "$DIR/requirements.txt"
 
-echo "== patch-vllm.sh"
-bash "$DIR/patch-vllm.sh"
+echo "== patch_vllm.py"
+"$VENV/bin/python" "$DIR/patch_vllm.py"
 
 mkdir -p "$(dirname "$MODEL")" "$(dirname "$DRAFT")"
 echo "== prepare/build_fast_model.py $MODEL"

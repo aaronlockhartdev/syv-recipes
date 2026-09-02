@@ -73,7 +73,7 @@ on prefix-cache hits).
 Dockerfile          uv + pinned vLLM 0.27.1 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
 setup.sh            bare-metal one-shot: venv, deps, patches, model prep
-patch-vllm.sh       applies patches/ to the installed vllm (bare metal)
+patch_vllm.py       applies patches/ to the installed vllm; idempotent, stamps the venv
 recipes/            the five serve configurations
 prepare/            build_fast_model.py, fetch_dflash2.py — one-time model prep
 patches/            the 19 vLLM patches (below)
@@ -119,8 +119,17 @@ bash setup.sh            # venv + pinned deps + the 19 patches + both models
 bash recipes/w4a16-int8-dflash2.sh  # or any of the other four
 ```
 
-`setup.sh` is idempotent and resumable — re-running it is the recovery
-path after a venv wipe or a stale-patch abort. Paths are overridable with
+`setup.sh` is idempotent — re-run it any time; it is also the recovery
+path after a venv wipe. `patch_vllm.py` converges whatever state it
+finds: a stamped venv whose vllm version, hash of `patches/`, and hash of the files the patches touch
+all still match is a fast "Audited … in place" no-op; a fully patched but
+not-yet-stamped tree (patched by an older run) is audited and stamped
+without touching a file; a partially patched tree (a crash mid-run) is
+completed in build order; a changed patch set, a vllm
+version change, or a hand-edited tree is detected and vllm reinstalled
+pristine before re-apply (the attestation covers the
+hunks: a hand edit that leaves every hunk's before/after content intact
+is indistinguishable from a patched tree). Paths are overridable with
 env vars of the same names the recipes use (defaults: `.venv`,
 `models/Qwen3.8-27B-W4A16-AutoRound-fast`,
 `models/Qwen3.8-27B-DFlash2-W4A16`), so a custom layout stays consistent
@@ -132,13 +141,13 @@ MODEL=/data/qwen bash recipes/w4a16-int8-dflash2.sh
 ```
 
 What `setup.sh` runs, in order, if you'd rather do it by hand (install uv
-first, and `patch` if your distro lacks it:
+first, and GNU `patch` if your distro lacks it:
 `curl -LsSf https://astral.sh/uv/install.sh | sh`):
 
 ```bash
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements.txt
-bash patch-vllm.sh
+.venv/bin/python patch_vllm.py
 .venv/bin/python prepare/build_fast_model.py models/Qwen3.8-27B-W4A16-AutoRound-fast
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 ```
