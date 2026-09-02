@@ -192,6 +192,25 @@ def complete(dst, fast_dir):
     return True
 
 
+def verify_draft_vocab(dst):
+    """The draft-vocab .pt and the draft head it feeds must agree
+    row-for-row: isfile alone passes a truncated .pt, which then dies at
+    server boot when the MTP patch torch.loads it."""
+    dst_idx = json.load(open(os.path.join(dst, "model.safetensors.index.json")))
+    ids = torch.load(
+        os.path.join(dst, "mtp_draft_vocab_ids.pt"),
+        map_location="cpu", weights_only=True,
+    )
+    packed = "mtp.draft_lm_head.weight_packed"
+    meta = _shard_meta(os.path.join(dst, dst_idx["weight_map"][packed]))
+    rows = meta[0][packed]["shape"][0] if meta else None
+    assert rows == len(ids), (
+        f"draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows -- "
+        "re-fetch the fast-variant overlay"
+    )
+    print(f"  draft vocab: {len(ids)} ids == {rows}-row draft head")
+
+
 def main():
     if len(sys.argv) != 2 or not sys.argv[1].strip():
         sys.exit("usage: python prepare/build_fast_model.py DEST_DIR")
@@ -248,6 +267,7 @@ def main():
             install(dst_t, os.path.realpath(tsrc), linkable=False)
 
     assert complete(dst, fast), "assembly finished but the completeness check still fails"
+    verify_draft_vocab(dst)
     print("fast model ready:", dst)
     print("serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
 
