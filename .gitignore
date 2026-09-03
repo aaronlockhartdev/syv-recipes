@@ -4,3 +4,6 @@ models/
 qwen.log
 __pycache__/
 *.pyc
+
+# agent runtime data (pi sessions, workflows)
+.pi/
