@@ -66,11 +66,14 @@ combination is new to the matrix).
   patch stack needs (and their defaults). No config branching. No comment
   lines inside backslash continuation chains.
 - **All scripts are idempotent** and print in uv's style via the shared
-  `prepare/_ui.py`: verb-led lines, `+` / `·` / `×` markers, bold stage
-  headers that group their sub-lines, counts, elapsed time, and in-place
-  progress (uv-style bars for measured work, spinners for the rest) whose
-  finished or failed status overwrites the in-progress line; non-TTY output
-  degrades to one line per event. TTY + NO_COLOR aware.
+  `prepare/_ui.py`: verb-led lines (first letter always capitalized),
+  `+` / `·` / `×` markers, bold stage headers that group their sub-lines,
+  counts, elapsed time, and in-place progress (uv-style bars for measured
+  work, spinners for the rest; the bar width adapts to the terminal,
+  every redraw erases the whole line) whose finished or failed status
+  overwrites the in-progress line; a child tool's own output (uv) is
+  re-emitted indented six spaces, as sub-output of its stage; non-TTY
+  output degrades to one line per event. TTY + NO_COLOR aware.
 - **No unmeasured numbers**: the README matrix's measurement columns
   (decode, prefill 16k, quality) are the user's to fill on this hardware.
   Numbers taken from upstream are single-card or a different shape; they

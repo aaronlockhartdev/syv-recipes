@@ -25,7 +25,7 @@ def _copy(src, dstp, size):
     """Copy one file into the destination; the big ones run as a bar."""
     f = os.path.basename(src)
     if size > _BAR_MIN:
-        p = ui.Progress(f"copying {f} ({ui.human(size)})", total=size)
+        p = ui.Progress(f"Copying {f} ({ui.human(size)})", total=size)
         with open(src, "rb") as a, open(dstp, "wb") as b:
             while True:
                 chunk = a.read(1 << 20)
@@ -33,10 +33,10 @@ def _copy(src, dstp, size):
                     break
                 b.write(chunk)
                 p.tick(len(chunk))
-        p.finish(True, f"{f}: copied ({ui.human(size)})")
+        p.finish(True, f"Copied {f} ({ui.human(size)})")
     else:
         shutil.copy(src, dstp)
-        ui.ok(f"{f}: copied ({ui.human(size)})")
+        ui.ok(f"Copied {f} ({ui.human(size)})")
 
 
 def main():
@@ -47,19 +47,20 @@ def main():
     t0 = time.monotonic()
 
     if len(sys.argv) != 2 or not sys.argv[1].strip():
-        sys.exit("usage: python prepare/fetch_dflash2.py DEST_DIR")
+        sys.exit("Usage: python prepare/fetch_dflash2.py DEST_DIR")
     dst = os.path.abspath(sys.argv[1])
     os.makedirs(dst, exist_ok=True)
 
     ui.stage(f"Fetching {REPO}")
-    p = ui.Progress(f"fetching {REPO}")
+    t_r = time.monotonic()
+    p = ui.Progress(f"Fetching {REPO}")
     try:
         hub = ui.snapshot(REPO, progress=p)
     except Exception as e:
-        p.finish(False, f"cannot fetch {REPO} ({e!r})",
+        p.finish(False, f"Fetching {REPO} failed ({e!r})",
                  "check the network and Hugging Face reachability; once cached, re-runs are offline",
                  fatal=True)
-    p.finish(True, f"{REPO} in {ui.dur(time.monotonic() - t0)}")
+    p.finish(True, f"Fetched {REPO} in {ui.dur(time.monotonic() - t_r)}")
 
     ui.stage(f"Installing {dst}")
     for f in FILES:
@@ -75,10 +76,10 @@ def main():
         except OSError:
             _copy(src, dstp, size)
             continue
-        ui.ok(f"{f}: hard-linked ({ui.human(size)})")
+        ui.ok(f"Hard-linked {f} ({ui.human(size)})")
 
     ui.done(f"DFlash2 drafter ready: {dst} ({ui.dur(time.monotonic() - t0)})")
-    ui.note("serve with: the dflash2-family recipes (this dir as DRAFT)")
+    ui.note("Serve with: the dflash2-family recipes (this dir as DRAFT)")
 
 
 if __name__ == "__main__":

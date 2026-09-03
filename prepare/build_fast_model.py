@@ -102,7 +102,7 @@ def _template_path():
     try:
         return hf_hub_download(TEMPLATE_REPO, TEMPLATE_FILE)
     except Exception as e:
-        ui.note(f"{TEMPLATE_FILE} unavailable from {TEMPLATE_REPO} ({e}); keeping the base chat template")
+        ui.note(f"Could not fetch {TEMPLATE_FILE} from {TEMPLATE_REPO} ({e}); keeping the base chat template")
         return None
 
 
@@ -122,8 +122,8 @@ def requant_embed(path, key):
     deq = (q.reshape(out_f, -1, GROUP).to(torch.float32) * scale).reshape(out_f, in_f)
     err = ((deq - w).norm() / w.norm()).item()
     if err >= 0.01:
-        ui.fail(f"embed_tokens quantization error too high ({err:.4f} >= 0.01) -- aborting")
-    ui.note(f"round-trip relative error: {err:.4f}")
+        ui.fail(f"The {key.rsplit('.', 1)[0]} quantization error is too high ({err:.4f} >= 0.01) -- aborting")
+    ui.note(f"Round-trip relative error: {err:.4f}")
     stem = key[: -len(".weight")]
     tensors[stem + ".weight_packed"] = pack_to_int32(q, BITS, packed_dim=1).contiguous()
     # the embedding path creates scales in params_dtype (bf16), unlike the linears
@@ -215,16 +215,16 @@ def verify_draft_vocab(model_dir):
             map_location="cpu", weights_only=True,
         )
     except Exception as e:
-        ui.fail(f"draft-vocab .pt in {model_dir} is unreadable ({e!r})",
-                "re-fetch the fast-variant overlay")
+        ui.fail(f"The draft-vocab .pt in {model_dir} is unreadable ({e!r})",
+                "Re-fetch the fast-variant overlay")
     packed = "mtp.draft_lm_head.weight_packed"
     path = dst_idx.get("weight_map", {}).get(packed)
     meta = _shard_meta(os.path.join(model_dir, path)) if path else None
     rows = meta[0].get(packed, {}).get("shape", [None])[0] if meta else None
     if rows != len(ids):
-        ui.fail(f"draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows",
-                "re-fetch the fast-variant overlay")
-    ui.note(f"draft vocab: {len(ids)} ids == {rows}-row draft head")
+        ui.fail(f"Draft-vocab mismatch: {len(ids)} ids vs {rows} draft-head rows",
+                "Re-fetch the fast-variant overlay")
+    ui.note(f"Draft vocab: {len(ids)} ids == {rows}-row draft head")
 
 
 def main():
@@ -235,27 +235,29 @@ def main():
     t0 = time.monotonic()
 
     if len(sys.argv) != 2 or not sys.argv[1].strip():
-        sys.exit("usage: python prepare/build_fast_model.py DEST_DIR")
+        sys.exit("Usage: python prepare/build_fast_model.py DEST_DIR")
     dst = os.path.abspath(sys.argv[1])
     os.makedirs(dst, exist_ok=True)
 
     ui.stage("Fetching the model repos")
-    p = ui.Progress(f"fetching {BASE_REPO}")
+    t_r = time.monotonic()
+    p = ui.Progress(f"Fetching {BASE_REPO}")
     try:
         base = _snapshot(BASE_REPO, progress=p)
     except Exception as e:
-        p.finish(False, f"cannot fetch {BASE_REPO} ({e!r})",
+        p.finish(False, f"Fetching {BASE_REPO} failed ({e!r})",
                  "check the network and Hugging Face reachability; once cached, re-runs are offline",
                  fatal=True)
-    p.finish(True, f"{BASE_REPO} in {ui.dur(time.monotonic() - t0)}")
-    p = ui.Progress(f"fetching {FAST_REPO}")
+    p.finish(True, f"Fetched {BASE_REPO} in {ui.dur(time.monotonic() - t_r)}")
+    t_r = time.monotonic()
+    p = ui.Progress(f"Fetching {FAST_REPO}")
     try:
         fast = _snapshot(FAST_REPO, progress=p)
     except Exception as e:
-        p.finish(False, f"cannot fetch {FAST_REPO} ({e!r})",
+        p.finish(False, f"Fetching {FAST_REPO} failed ({e!r})",
                  "check the network and Hugging Face reachability; once cached, re-runs are offline",
                  fatal=True)
-    p.finish(True, f"{FAST_REPO} in {ui.dur(time.monotonic() - t0)}")
+    p.finish(True, f"Fetched {FAST_REPO} in {ui.dur(time.monotonic() - t_r)}")
     tsrc = _template_path()
     # fail fast: a bad download or an unexpected overlay layout costs
     # seconds here instead of a full copy + requant build
@@ -265,32 +267,35 @@ def main():
         # dirs built before this check existed (or hit by in-place corruption
         # after a good run) are only caught here
         verify_draft_vocab(dst)
-        ui.done(f"fast model already complete: {dst} ({ui.dur(time.monotonic() - t0)})")
+        ui.done(f"Fast model already complete: {dst} ({ui.dur(time.monotonic() - t0)})")
         return
 
     ui.stage(f"Assembling {dst}")
     base_idx = json.load(open(os.path.join(base, "model.safetensors.index.json")))
     embed_key = next(k for k in base_idx["weight_map"] if k.endswith("embed_tokens.weight"))
 
-    def place(f, src, linkable):
+    def place(f, src, linkable, force=False):
         """One file into dst: hard-link where allowed, copied otherwise;
-        copies above _BAR_MIN run as a progress bar."""
+        copies above _BAR_MIN run as a progress bar. force re-copies even
+        when the destination is already the same size -- for the embed
+        shard, whose in-place requantize must always start from the cache's
+        bytes, never from a possibly corrupted earlier output."""
         dstp = os.path.join(dst, f)
-        if file_ready(dstp, src):
+        if not force and file_ready(dstp, src):
             return
         if os.path.lexists(dstp):
             os.remove(dstp)
         size = os.path.getsize(src)
         if linkable and _hardlink(src, dstp):
-            ui.ok(f"{f}: hard-linked ({ui.human(size)})")
+            ui.ok(f"Hard-linked {f} ({ui.human(size)})")
             return
         if size > _BAR_MIN:
-            p = ui.Progress(f"copying {f} ({ui.human(size)})", total=size)
+            p = ui.Progress(f"Copying {f} ({ui.human(size)})", total=size)
             _copy_progressed(src, dstp, p)
-            p.finish(True, f"{f}: copied ({ui.human(size)})")
+            p.finish(True, f"Copied {f} ({ui.human(size)})")
         else:
             shutil.copy(src, dstp)
-            ui.ok(f"{f}: copied ({ui.human(size)})")
+            ui.ok(f"Copied {f} ({ui.human(size)})")
 
     embed_done = False
     if os.path.isfile(os.path.join(dst, EMBED_SHARD)):
@@ -305,12 +310,12 @@ def main():
             if embed_done:
                 continue
             # copy, never link: in-place edits must not write through into
-            # the shared HF cache
-            place(f, src, linkable=False)
-            q = ui.Progress("requantizing embed_tokens to int8 (the only local step)")
+            # the shared HF cache; force: always re-copy from the cache
+            place(f, src, linkable=False, force=True)
+            q = ui.Progress("Requantizing embed_tokens to int8 (the only local step)")
             t1 = time.monotonic()
             requant_embed(os.path.join(dst, f), embed_key)
-            q.finish(True, f"{f}: embed_tokens requantized to int8 group-128 in {ui.dur(time.monotonic() - t1)}")
+            q.finish(True, f"Requantized {f} embed_tokens to int8 group-128 in {ui.dur(time.monotonic() - t1)}")
         else:
             place(f, src, linkable=True)
 
@@ -322,8 +327,8 @@ def main():
 
     assert complete(dst, fast), "assembly finished but the completeness check still fails"
     verify_draft_vocab(dst)
-    ui.done(f"fast model ready: {dst} ({ui.dur(time.monotonic() - t0)})")
-    ui.note("serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
+    ui.done(f"Fast model ready: {dst} ({ui.dur(time.monotonic() - t0)})")
+    ui.note("Serve with: recipes/w4a16-int8-dflash2.sh (this dir as MODEL)")
 
 
 if __name__ == "__main__":

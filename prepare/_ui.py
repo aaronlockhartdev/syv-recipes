@@ -1,10 +1,13 @@
 """Shared uv-style output for the scripts.
 
-The look: verb-led lines, `+` / `·` / `×` markers, counts and elapsed
-time, and bold stage headers that group the sub-lines under them.
-Long-running work shows an in-place progress line (a uv-style bar for
-measured work, a spinner for unmeasured work); the finished or failed
-status overwrites that line instead of appending below it.
+The look: verb-led lines (the first letter of every line is capital),
+`+` / `·` / `×` markers, counts and elapsed time, and bold stage
+headers that group the sub-lines under them. Long-running work shows an
+in-place progress line (a uv-style bar for measured work, a spinner
+for unmeasured work); the finished or failed status overwrites that
+line -- the terminal's erase-the-whole-line escape clears it, so no
+trailing characters survive. Foreign command output (uv) is re-emitted
+six spaces in, as sub-output of the stage that invoked it.
 
 TTY + NO_COLOR aware, as the scripts' output contract: NO_COLOR kills
 the color; the in-place updating needs a TTY, and elsewhere everything
@@ -13,12 +16,15 @@ line), so a piped or captured run stays readable and greppable.
 """
 
 import os
+import subprocess
 import sys
 import threading
 import time
 
 IS_TTY = sys.stdout.isatty()
 COLOR = IS_TTY and not os.environ.get("NO_COLOR")
+
+_ERASE_LINE = "\x1b[2K"  # vt100: erase the whole line (no leftover tail)
 
 
 def c(code, s):
@@ -41,41 +47,49 @@ def red(s):
     return c("31", s)
 
 
+def _cap(s):
+    """The house rule: a line that starts with a letter starts capital.
+    Markers, digits and symbols lead untouched."""
+    if s and s[0].isalpha() and s[0].islower():
+        return s[0].upper() + s[1:]
+    return s
+
+
 # --- the line vocabulary ------------------------------------------------
 
 
 def stage(title):
     """A stage header: bold, at the top indent; its sub-lines follow."""
-    print(bold(f"  {title}"))
+    print(bold(f"  {_cap(title)}"))
 
 
 def note(s):
     """A quiet sub-line: already done, already skipped, a detail."""
-    print(dim(f"    · {s}"))
+    print(dim(f"    · {_cap(s)}"))
 
 
 def ok(s):
     """A sub-line that finished well."""
-    print(green(f"    + {s}"))
+    print(green(f"    + {_cap(s)}"))
 
 
 def done(s):
     """Top-level success, one per script run."""
-    print(green(f"  \u2713 {s}"))
+    print(green(f"  \u2713 {_cap(s)}"))
 
 
 def _hints(hints, pad):
     cont = " " * (len(pad) + 6)
     for i, h in enumerate(hints):
         if i == 0:
-            print(dim(f"{pad}  \u2570\u2500> {h}"))
+            print(dim(f"{pad}  \u2570\u2500> {_cap(h)}"))
         else:
-            print(dim(f"{cont}{h}"))
+            print(dim(f"{cont}{_cap(h)}"))
 
 
 def fail(msg, *hints):
     """Top-level failure; exits 1."""
-    print(red(f"  \u00d7 {msg}"))
+    print(red(f"  \u00d7 {_cap(msg)}"))
     _hints(hints, "  ")
     sys.exit(1)
 
@@ -103,14 +117,46 @@ def human(n):
         n /= 1024
 
 
+# --- foreign commands ----------------------------------------------------
+
+def run_indented(cmd):
+    """Run a foreign command (uv, ...) and re-emit its output six
+    spaces in, as sub-output of the current stage. The child sees a
+    pipe, so TTY-aware tools drop their own layout and print plain
+    lines -- which stay readable under the indent. Returns the exit
+    code. Do not run while a live Progress bar is active."""
+    proc = subprocess.Popen([str(x) for x in cmd], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace")
+
+    def _pump():
+        for line in proc.stdout:
+            sys.stdout.write("      " + line)
+            sys.stdout.flush()
+
+    t = threading.Thread(target=_pump, daemon=True)
+    t.start()
+    rc = proc.wait()
+    t.join(timeout=5)
+    return rc
+
+
 # --- the progress line ---------------------------------------------------
 
 _SPIN = "\u280b\u2819\u2839\u2838\u283c\u2834\u2866\u2867\u2807\u280f"
-_BAR = 16
 _SHOW_AFTER = 0.25     # seconds before the live line is worth showing
 _DRAW_HZ = 10          # how often the live line redraws
 
 _noop = lambda *a, **k: None
+
+
+def _term_width(default=80):
+    try:
+        import fcntl
+        import termios
+        return fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ)[1] or default
+    except Exception:
+        return default
 
 
 class Progress:
@@ -120,19 +166,19 @@ class Progress:
     overwrites the live line with the final `+` (or `×`) line on a TTY,
     and prints one line per event elsewhere. A step that finishes before
     _SHOW_AFTER never shows the live line at all -- no flash of a bar
-    for sub-250ms work.
-    """
+    for sub-250ms work."""
 
     def __init__(self, label, total=None):
-        self.label = label
+        self.label = _cap(label)
         self.total = float(total) if total is not None else None
         self.n = 0.0
         self.files_total = None
         self.files_done = 0
         self.t0 = time.monotonic()
+        w = _term_width()
+        self._bar_w = 16 if w >= 100 else max(8, min(16, w - 48))
         self._shown = False
         self._last = 0.0
-        self._width = 0
         self._finished = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -171,19 +217,18 @@ class Progress:
     def finish(self, ok=True, text=None, *hints, fatal=False):
         """Overwrite the live line with the final status line.
 
-        With fatal, exits 1 after printing a failure and its hints.
-        """
+        With fatal, exits 1 after printing a failure and its hints."""
         with self._lock:
             self._finished = True
             clear = IS_TTY and self._shown
         self._stop.set()
         if clear:
-            sys.stdout.write("\r" + " " * self._width + "\r")
+            sys.stdout.write("\r" + _ERASE_LINE + "\r")
             sys.stdout.flush()
         if ok:
-            print(green(f"    + {text or self.label}"))
+            print(green(f"    + {_cap(text or self.label)}"))
         else:
-            print(red(f"    \u00d7 {text or self.label}"))
+            print(red(f"    \u00d7 {_cap(text or self.label)}"))
             _hints(hints, "    ")
             if fatal:
                 sys.exit(1)
@@ -194,11 +239,12 @@ class Progress:
         """(plain length, colored line) of the live progress line."""
         elapsed = time.monotonic() - self.t0
         rate = self.n / elapsed if elapsed > 1e-3 else 0.0
+        bw = self._bar_w
         if self.total and self.total > 0 and self.n > 0:
             frac = min(1.0, self.n / self.total)
-            fill = round(frac * _BAR)
-            bar_p = "\u2588" * fill + "\u2591" * (_BAR - fill)
-            bar_c = green("\u2588" * fill) + dim("\u2591" * (_BAR - fill))
+            fill = round(frac * bw)
+            bar_p = "\u2588" * fill + "\u2591" * (bw - fill)
+            bar_c = green("\u2588" * fill) + dim("\u2591" * (bw - fill))
             pct = f"{frac * 100:3.0f}%"
             meas = f"{human(self.n)}/{human(self.total)}"
             if rate:
@@ -214,7 +260,7 @@ class Progress:
         if self.files_total:
             extra = f"{self.files_done}/{self.files_total} files"
         parts_p = [bar_p]
-        parts_c = [bar_c + " " * max(0, _BAR - len(bar_p))]
+        parts_c = [bar_c + " " * max(0, bw - len(bar_p))]
         for piece in (pct, meas, extra):
             if piece:
                 parts_p.append(piece)
@@ -234,6 +280,7 @@ class Progress:
         while not self._stop.wait(1 / _DRAW_HZ):
             with self._lock:
                 self._draw(force=True)
+
     def _draw(self, force=False):
         if self._finished:
             return
@@ -250,9 +297,8 @@ class Progress:
         if not force and now - self._last < 1 / _DRAW_HZ:
             return
         self._last = now
-        width, line = self._render()
-        self._width = width
-        sys.stdout.write("\r" + line + "\r")
+        line = self._render()[1]
+        sys.stdout.write("\r" + _ERASE_LINE + line + "\r")
         sys.stdout.flush()
 
 
@@ -263,8 +309,7 @@ def snapshot(repo, progress=None, **kw):
 
     Tries the local cache first: a warm cache resolves silently and
     instantly. The network pass routes all of huggingface_hub 1.x's
-    internal bars into `progress` (a Progress).
-    """
+    internal bars into `progress` (a Progress)."""
     from huggingface_hub import snapshot_download
 
     try:
@@ -285,15 +330,14 @@ def _tqdm_bridge(progress):
     _create_progress_bar, which drops the `name` it is handed for custom
     classes -- so they are told apart by desc -- plus a `total` that is
     assigned by attribute as files are planned, and the files bar straight
-    from hf_thread_map (desc plus total, no unit).
-    """
+    from hf_thread_map (desc plus total, no unit)."""
     lock = threading.Lock()
 
     class Bar:
         def __init__(self, *, name=None, desc=None, total=None, initial=0,
                      unit=None, unit_scale=False, bar_format=None, **_):
             self._n = 0
-            self._prev_total = 0
+            self._total_lock = threading.Lock()
             self._total = None if total is None else total
             self.format_dict = {}
             if (name and name.endswith(".transfer")) or desc == "Downloading bytes":
@@ -322,15 +366,19 @@ def _tqdm_bridge(progress):
 
         @property
         def total(self):
-            return self._total
+            with self._total_lock:
+                return self._total
 
         @total.setter
         def total(self, v):
             if v is None:
                 return
-            prev = self._prev_total
-            self._prev_total = v
-            self._total = v
+            # the hub computes v = (bar.total or 0) + file_size and assigns
+            # it from worker threads; read and publish atomically so two
+            # concurrent plannings cannot drop a delta
+            with self._total_lock:
+                prev = self._total or 0
+                self._total = v
             if self._kind == "bytes" and v > prev:
                 progress.add_total(v - prev)
 

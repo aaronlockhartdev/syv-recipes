@@ -73,16 +73,19 @@ DRAFT = Path(
 PY = VENV / "bin" / "python"
 
 
-
-def run(label, cmd, *hints):
+def run(label, cmd, *hints, indent=False):
     """Stage a step: bold header, then the child does the work (the
     children are uv-style too). Exit on failure with the step named;
-    return the start time."""
+    return the start time. indent re-emits a child's own output (uv)
+    six spaces in, as sub-output of this stage."""
     ui.stage(label)
     t0 = time.monotonic()
-    r = subprocess.run([str(x) for x in cmd])
-    if r.returncode != 0:
-        ui.fail(f"{label} failed (exit {r.returncode})", *hints)
+    if indent:
+        rc = ui.run_indented([str(x) for x in cmd])
+    else:
+        rc = subprocess.run([str(x) for x in cmd]).returncode
+    if rc != 0:
+        ui.fail(f"{label} failed (exit {rc})", *hints)
     return t0
 
 
@@ -95,53 +98,55 @@ def main():
     uv = shutil.which("uv")
     if uv is None:
         ui.fail(
-            "uv is not on PATH",
-            "install it:  curl -LsSf https://astral.sh/uv/install.sh | sh",
-            "then put ~/.local/bin on your PATH:  "
+            "The uv tool is not on PATH",
+            "Install it:  curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "Then put ~/.local/bin on your PATH:  "
             'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc',
         )
 
     if PY.is_file():
-        ui.note(f"venv {VENV} already present -- skipping")
+        ui.note(f"Venv {VENV} already present -- skipping")
     else:
         VENV.parent.mkdir(parents=True, exist_ok=True)
         t0 = run(
-            "creating the venv",
+            "Creating the venv",
             [uv, "venv", VENV, "--python", "3.12"],
-            f"no python 3.12?  install one (e.g.  brew install python@3.12) and re-run",
+            "No python 3.12?  Install one (e.g.  brew install python@3.12) and re-run",
+            indent=True,
         )
         if not PY.is_file():
-            ui.fail(f"the venv at {VENV} has no python", f"delete it and re-run:  rm -rf {VENV}")
-        ui.ok(f"venv {VENV} in {ui.dur(time.monotonic() - t0)}")
+            ui.fail(f"The venv at {VENV} has no python", f"Delete it and re-run:  rm -rf {VENV}")
+        ui.ok(f"Venv {VENV} in {ui.dur(time.monotonic() - t0)}")
 
     run(
-        "installing the pinned requirements",
+        "Installing the pinned requirements",
         [uv, "pip", "install", "--python", PY, "-r", REPO / "requirements.txt"],
-        "on this platform the vllm wheel may not exist -- on bare metal you are "
+        "On this platform the vllm wheel may not exist -- on bare metal you are "
         "expected to be on Linux with a GPU",
+        indent=True,
     )
 
     run(
-        "patching vllm",
+        "Patching vllm",
         [PY, REPO / "prepare" / "patch_vllm.py"],
-        "the venv is left as found; re-run to converge, or reset it:  "
+        "The venv is left as found; re-run to converge, or reset it:  "
         "uv pip install --force-reinstall --no-deps vllm==0.27.1",
     )
 
     MODEL.parent.mkdir(parents=True, exist_ok=True)
     DRAFT.parent.mkdir(parents=True, exist_ok=True)
     run(
-        "building the fast model",
+        "Building the fast model",
         [PY, REPO / "prepare" / "build_fast_model.py", MODEL],
-        "check the HF download above; the HF cache can be mounted into Docker "
+        "Check the HF download above; the HF cache can be mounted into Docker "
         "(see the README) so a later container run does not re-download",
     )
     run(
-        "fetching the DFlash2 drafter",
+        "Fetching the DFlash2 drafter",
         [PY, REPO / "prepare" / "fetch_dflash2.py", DRAFT],
     )
 
-    ui.done(f"ready -- serve with:  bash {REPO / 'recipes' / 'w4a16-int8-dflash2.sh'}   (or any of recipes/)")
+    ui.done(f"Ready -- serve with:  bash {REPO / 'recipes' / 'w4a16-int8-dflash2.sh'}   (or any of recipes/)")
 
 
 if __name__ == "__main__":
