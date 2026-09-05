@@ -34,13 +34,14 @@ combination is new to the matrix).
 
 ## Invariants
 
-- **`patches/` is the synced set (19).** They apply in alphabetical = build
-  order because later patches depend on files created by earlier ones. New
-  patches are taken from upstream with provenance noted in the header
-  (e.g. "upstream bb739e4"). Never hand-edit vLLM; `prepare/patch_vllm.py`
-  is the only thing that touches the installed tree, and it attests the
-  result with a 3-field stamp (version + patch-set fingerprint + tree
-  digest).
+- **`patches/` is the synced set (28).** They apply in alphabetical = build
+  order because later patches depend on files created by earlier ones.
+  They are the upstream files verbatim (`upstream/synced` names the
+  upstream commit they come from); their headers carry the provenance
+  (PR/issue refs and, where upstream stamps one, an "upstream <sha>"
+  line). Never hand-edit vLLM; `prepare/patch_vllm.py` is the only thing
+  that touches the installed tree, and it attests the result with a
+  3-field stamp (version + patch-set fingerprint + tree digest).
 - **MTP must keep `cudagraph_mode: PIECEWISE`** — the default (FULL)
   corrupts one prompt length in 128 (residue `k+1`) under prefix-cache hits.
 - **int4 KV must keep `--prefix-match-unit 848`** (drafter sliding-window
@@ -50,8 +51,21 @@ combination is new to the matrix).
   upstream's fp8/FlashInfer lane.
 - **No WSL2 support** anywhere in this repo (upstream had a whole WSL2
   lane; it is out of scope here). Likewise no env vars for upstream
-  features this repo deliberately dropped (KVarN, dflash2-lookup-drafting,
-  dflash2-ngram-chains).
+  features this repo deliberately dropped (KVarN and its 4/2-bit KV lane,
+  the WSL2 lane). The lookup/chain envs (`VLLM_DFLASH2_LOOKUP`,
+  `VLLM_DFLASH2_CHAIN`) exist in the patch set — both adopted in the
+  0.28.0 sync, both off by default, enabled by `.env` only.
+- **DFlash2 is native in vLLM 0.28.0** (upstream PR #52816); the 0.27.1
+  `dflash2-backport` is retired. The `dflash2-*` patches extend the native
+  implementation, and `dflash2-lookup-drafting` additionally carries the
+  W4A16 draft-checkpoint support (packed-qkv dequant, quantized lm_head
+  sharing) that serving this model needs — do not trim it on the
+  assumption it is just an option.
+- **A dflash2 speculative-config must set `draft_sample_method`** (upstream
+  #73): on 0.28.0 the native speculator base allocates the draft-logits
+  buffer only when the config asks; without it the rejection test loses
+  its denominator and acceptance drops ~16% (101.4 vs 121.7 tok/s
+  upstream). All four dflash2 recipes set it to probabilistic.
 - **Vision is on** (no `--language-model-only`) — two 24 GB cards are not
   VRAM-limited; the tower offloads to pinned host RAM by default
   (`VLLM_VISION_CPU_OFFLOAD_GB=1`) since dflash2 + vision OOMs at graph
@@ -86,7 +100,7 @@ Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
 recipes/ the five *.sh
 prepare/ build_fast_model.py, fetch_dflash2.py, patch_vllm.py, _ui.py
-patches/ the 19 synced patches
+patches/ the 28 synced patches
 ```
 
 Defaults: venv `.venv/`, models under `models/`, port 8080, and `Qwen3.8-
@@ -105,7 +119,7 @@ does not merge main; sync is a manual diff:
    (measured numbers and gotchas), and `prepare/` scripts.
 3. Adopt relevant patches into `patches/` and launcher knowledge into the
    recipes; note upstream provenance + measured deltas in comments.
-4. Validate: the full set applies in order on a pristine Linux vllm 0.27.1
+4. Validate: the full set applies in order on a pristine Linux vllm 0.28.0
    and compiles — `prepare/patch_vllm.py` does exactly this and is
    re-run on every setup/serve.
 

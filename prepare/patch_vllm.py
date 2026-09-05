@@ -13,7 +13,7 @@ with the vllm version, a hash of patches/, and a hash of the tree the
 patches touch. A re-run whose stamp still matches all three is a fast
 no-op:
 
-    Audited vllm 0.27.1: 19 patches in place in 0.03s
+    Audited vllm 0.28.0: 28 patches in place in 0.03s
 
 When the hash no longer matches -- you pulled or edited patches, the
 venv's vllm changed, or the tree was edited after the audit -- the old

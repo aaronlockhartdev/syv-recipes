@@ -1,12 +1,12 @@
-# Pinned to the reference install (vllm 0.27.1 pulls torch 2.13.0 cu130,
-# triton 3.7.1, flashinfer-python 0.6.16.post3 itself; huggingface_hub +
+# Pinned to the reference install (vllm 0.28.0 pulls torch 2.13.0 cu130,
+# triton 3.7.1 and the matching flashinfer set itself; huggingface_hub +
 # hf_transfer are what the prepare scripts use for downloads).
-vllm==0.27.1
+vllm==0.28.0
 transformers==5.15.0
 tokenizers==0.22.2
 compressed-tensors==0.17.0
 huggingface_hub==1.27.0
 hf_transfer==0.1.9
 ninja==1.13.0
-# required by --prefix-caching-hash-algo xxhash in both recipes
+# required by --prefix-caching-hash-algo xxhash in all five recipes
 xxhash==4.0.1

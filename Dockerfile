@@ -1,8 +1,8 @@
-# Pinned vLLM 0.27.1 with every patch in patches/ applied.
+# Pinned vLLM 0.28.0 with every patch in patches/ applied.
 #
-# vLLM 0.27.1 pins torch 2.13.0 (cu130), triton 3.7.1 and
-# flashinfer-python 0.6.16.post3 itself, so requirements.txt only pins what
-# the reference install resolved for the rest.
+# vLLM 0.28.0 pins torch 2.13.0 (cu130), triton 3.7.1 and the matching
+# flashinfer set itself, so requirements.txt only pins what the reference
+# install resolved for the rest.
 #
 # Base is CUDA "base" + nvcc, not "devel": vLLM's wheels bring their own
 # CUDA libraries, but Triton's launchers and FlashInfer's JIT need a

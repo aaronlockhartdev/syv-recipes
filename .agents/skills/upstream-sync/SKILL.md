@@ -21,10 +21,12 @@ record of decisions already made.
 - **Flag, performance, or correctness improvement → apply
   automatically**, with upstream provenance noted wherever it lands.
 - **Deliberately dropped upstream features are out of scope** (KVarN
-  4/2-bit KV, lookup-augmented drafting, n-gram chains, the whole WSL2
-  lane — see `AGENTS.md` and the README). Never adopt, never present —
-  unless a change touches code both stacks share and alters behavior of
-  a path this repo depends on; that is presented as a correctness item.
+  4/2-bit KV, the whole WSL2 lane — see `AGENTS.md` and the README).
+  Never adopt, never present — unless a change touches code both stacks
+  share and alters behavior of a path this repo depends on; that is
+  presented as a correctness item. (Lookup-augmented drafting and
+  n-gram chains are adopted, both off by default — `VLLM_DFLASH2_LOOKUP`
+  / `VLLM_DFLASH2_CHAIN` are not dropped-lane flags.)
 - **A vLLM version bump is always presented on its own, first.** It
   re-baselines every patch, `requirements.txt`, the Dockerfile, and
   every "written against vLLM X" claim, so the rest of the range cannot
@@ -83,8 +85,9 @@ classify before touching anything:
 | `bench/`, `drafter/`, `kvarn/`, `.github/`, `verify.sh`, `docker-compose.yml` | upstream's own harness/CI | nothing — we validate with `prepare/patch_vllm.py` | skip (note interesting ideas in the digest) |
 
 \* "auto" means *the change*, not the lane: launcher edits that enable a
-dropped lane (KVarN, WSL2, lookup/ngram) or that change user-visible
-quality or VRAM behavior are presented, not applied.
+dropped lane (KVarN, WSL2) or that change user-visible quality or VRAM
+behavior are presented, not applied. Features adopted but off by default
+(`VLLM_DFLASH2_LOOKUP` / `VLLM_DFLASH2_CHAIN`) are normal recipe work.
 
 Classifying a **new patch**: it is a **fix/improvement (auto)** when it
 touches files, env vars, or lanes this repo already ships (the dflash2

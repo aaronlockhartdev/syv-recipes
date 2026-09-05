@@ -7,20 +7,24 @@
 # 57,669 for the bf16 config -- PR #42). Costs ~20% decode vs the bf16
 # FlashAttention path.
 #
-# Two unverified items upstream, so trust but verify on your workload:
-# (1) the cache's quality at depth has never been measured; (2)
-# VLLM_INT4_MQ_3D (below) is the multi-query 3D dispatch upstream ships
-# opt-in with correctness checks still owed (their MR-DRAFT); we keep it on
-# because the 2D fallback is ~10x slower in deep decode (3.6 vs 29 tok/s),
-# i.e. disabling speculation is the only alternative -- sanity-check
-# outputs against w4a16-bf16-dflash2 on the same prompts.
+# Two items to trust-but-verify on your workload (this box, TP=2):
+# (1) quality at depth was measured once upstream, on a single RTX 4090:
+# 96.0% GSM8K (200 questions, greedy) and a 100k-token needle retrieved at
+# 90% depth -- inside the band the other configs read (95.0-96.5%), but it
+# has not been measured on this TP=2 shape; (2) VLLM_INT4_MQ_3D (below) is
+# the multi-query 3D dispatch: upstream found two defects in it -- silent
+# 2D fallback on 9-16-token batches (#46 gate campaign) and out-of-budget
+# scratch (#57 review) -- that the two spec-decode-scratch-* patches fix,
+# so the 2D fallback exists mainly as a debug switch --
+# sanity-check outputs against w4a16-bf16-dflash2 on the same prompts.
 #
 # --prefix-match-unit 848 is not optional here: under int4's halved-page
 # geometry the drafter's sliding-window block is 848 tokens against a 1696
 # hash unit, and without the flag the prefix cache can never match this KV
-# layout (upstream: wsl2-4090.md). Needs two patches: patches/int4-kv-
-# per-token-head.patch (boot blockers for int4 KV with the drafter) and
-# patches/spec-decode-int4-kv-mq3d.patch (VLLM_INT4_MQ_3D). The split-KV
+# layout (upstream: wsl2-4090.md). Needs three patches: patches/int4-kv-
+# per-token-head.patch (boot blockers for int4 KV with the drafter),
+# patches/spec-decode-int4-kv-mq3d.patch (VLLM_INT4_MQ_3D) and the
+# spec-decode-scratch-* pair (3D scratch sizing + budgeting). The split-KV
 # verify kernel reads bf16/int8 caches only, so VLLM_SPEC_DECODE_ATTN is
 # deliberately unset here.
 
@@ -96,6 +100,10 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 # tokens -- the cap (not the count) sets the encoder's profiled peak in
 # the KV pool (at most the 4096-token encoder budget); the count only
 # bounds per-request context. xxhash: faster prefix-cache hashes than sha256.
+# draft_sample_method is required on 0.28.0: the native DFlash2 inherits the
+# upstream speculator base, which allocates the draft-logits buffer only when
+# the config asks; without it the rejection test loses its denominator and
+# acceptance drops ~16% (upstream #73).
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
@@ -115,7 +123,7 @@ exec vllm serve "$MODEL" \
   --mamba-cache-mode align \
   --limit-mm-per-prompt '{"image":{"count":16}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
-  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}' \
   --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \

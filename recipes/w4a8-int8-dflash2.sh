@@ -101,6 +101,10 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 # tokens -- the cap (not the count) sets the encoder's profiled peak in
 # the KV pool (at most the 4096-token encoder budget); the count only
 # bounds per-request context. xxhash: faster prefix-cache hashes than sha256.
+# draft_sample_method is required on 0.28.0: the native DFlash2 inherits the
+# upstream speculator base, which allocates the draft-logits buffer only when
+# the config asks; without it the rejection test loses its denominator and
+# acceptance drops ~16% (upstream #73).
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
@@ -119,7 +123,7 @@ exec vllm serve "$MODEL" \
   --mamba-cache-mode align \
   --limit-mm-per-prompt '{"image":{"count":16}}' \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
-  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7}' \
+  --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}' \
   --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \

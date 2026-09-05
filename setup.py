@@ -130,7 +130,7 @@ def main():
         "Patching vllm",
         [PY, REPO / "prepare" / "patch_vllm.py"],
         "The venv is left as found; re-run to converge, or reset it:  "
-        "uv pip install --force-reinstall --no-deps vllm==0.27.1",
+        "uv pip install --force-reinstall --no-deps vllm==0.28.0",
     )
 
     MODEL.parent.mkdir(parents=True, exist_ok=True)
