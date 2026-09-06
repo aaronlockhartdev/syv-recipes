@@ -93,6 +93,12 @@ export VLLM_MARLIN_INPUT_DTYPE=int8
 export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
 # torch sampler (flashinfer's needs nvcc to JIT)
 export VLLM_USE_FLASHINFER_SAMPLER=0
+# hold the mamba "align" state snapshots a multi-turn prefix hit resumes
+# from alive until the request ends (upstream #52 / vllm#45238;
+# patches/mamba-align-checkpoint-order.patch). That patch ships default
+# off -- we default it on (deviation); retention is bounded (<=3 blocks per
+# request per group). Set VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=0 to opt out.
+export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=${VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS:-1}
 # keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 

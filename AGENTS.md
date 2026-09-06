@@ -70,6 +70,14 @@ combination is new to the matrix).
   VRAM-limited; the tower offloads to pinned host RAM by default
   (`VLLM_VISION_CPU_OFFLOAD_GB=1`) since dflash2 + vision OOMs at graph
   capture on 24 GB without it.
+
+- **Mamba align-snapshot retention is on by default**
+  (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` in every recipe — the patch
+  ships off; deviation). All recipes run `--mamba-cache-mode align`,
+  where retaining the CoW'd snapshots fixes the ~1-in-4-5-turn TTFT
+  collapse (upstream #52 / vllm#45238); retention is bounded (<=3
+  blocks per request per group) and the patch's A/B measured no
+  change at realistic pool sizes. Set the var to 0 to opt out.
 - **Empty means unset, everywhere**: bash `${VAR:-default}`, Python
   `os.environ.get(k) or default`, and the `.env` loader all treat an
   empty string as absent. `.env` (repo root, gitignored) only fills

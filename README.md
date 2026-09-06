@@ -184,7 +184,7 @@ patches below extend the native implementation instead.
 - `marlin-int8-negative-scales.patch` — correctness fix for negative group scales in W4A8
 - `marlin-repack-staged-sm80.patch` — staged Marlin repack (load-time allocation hygiene; the header records #27's corrected history — the old "VMM churn" theory was disproven)
 - `marlin-tune-table.patch` — routes `marlin_gemm` through a locally built tunable Marlin extension (`VLLM_MARLIN_TUNE=1`, a no-op without that build): +3-7% on the M≤16 decode/verify GEMMs, +2-20% on W4A8 chunked-prefill GEMMs
-- `mamba-align-checkpoint-order.patch` — opt-in (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`) retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238)
+- `mamba-align-checkpoint-order.patch` — retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238). Ships default off; all five recipes default it on (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`)
 - `mamba-chunked-prefill-align.patch` — correctness fix: GDN/Mamba state loss and NaN during chunked prefill (the state-copy source column, and an uninitialized-memory mask in the flash-linear-attention chunk-o kernel)
 - `offload-dflash-eagle-groups.patch` — OffloadingConnector group flagging under dflash
 - `qwen3_5-embed-quant.patch` — route the embedding table through the quantized path (the fast model needs it)
@@ -260,8 +260,9 @@ n-gram chains are in the set (both off by default) — adopted in this sync.
   tok/s), flat on prose. Both were measured upstream on a single card;
   lookup is untested on TP=2 — check acceptance and output before relying
   on it (drop either into `.env` to try).
-- **Multi-turn prefix caching**: `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`
-  (off by default) keeps the mamba state snapshots a conversation's hits
+- **Multi-turn prefix caching**: `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS`
+  (on by default in the recipes — the patch ships it off; set it to 0
+  to opt out) keeps the mamba state snapshots a conversation's hits
   resume from alive until the request ends. The failure this fixes:
   upstream #47 saw a ~44 s TTFT spike every 4-5 turns at 44k context —
   the mamba group's hit vanishing while the attention group stayed 100%
