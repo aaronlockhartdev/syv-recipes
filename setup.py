@@ -110,8 +110,8 @@ def main():
         VENV.parent.mkdir(parents=True, exist_ok=True)
         t0 = run(
             "Creating the venv",
-            [uv, "venv", VENV, "--python", "3.12"],
-            "No python 3.12?  Install one (e.g.  brew install python@3.12) and re-run",
+            [uv, "venv", VENV, "--python", "3.14"],
+            "No python 3.14?  Install one (e.g.  uv python install 3.14) and re-run",
             indent=True,
         )
         if not PY.is_file():

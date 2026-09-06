@@ -14,18 +14,18 @@ FROM nvidia/cuda:13.0.1-base-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3.12 python3.12-venv python3.12-dev \
       cuda-nvcc-13-0 cuda-cudart-dev-13-0 libcurand-dev-13-0 \
       build-essential patch curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# uv owns all package management
+# uv owns all package management; it also fetches CPython 3.14 (managed
+# download -- the base image ships no system python)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 COPY requirements.txt .
-RUN uv venv .venv --python /usr/bin/python3.12 \
+RUN uv venv .venv --python 3.14 \
     && uv pip install --python .venv/bin/python -r requirements.txt
 
 # set -e + --batch: a hunk that fails (or was already applied) aborts the

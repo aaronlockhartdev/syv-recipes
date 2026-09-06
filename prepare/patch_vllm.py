@@ -494,7 +494,7 @@ def reverse_cascade(patches, sp, tick=None):
 def reinstall(version, sp):
     if version == "unknown":
         ui.fail("The vllm version is not readable, so it cannot be reinstalled",
-                f"Recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
+                f"Recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.14 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
     if shutil.which("uv") is None:
         ui.fail("The uv tool is not on PATH (needed to reinstall vllm)",
                 "one time:  curl -LsSf https://astral.sh/uv/install.sh | sh")
@@ -518,7 +518,7 @@ def reinstall(version, sp):
                           "--force-reinstall", "--no-deps", pin])
     if rc != 0:
         ui.fail(f"The uv reinstall of vllm=={version} failed",
-                f"The venv may now hold a broken vllm -- recreate it:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
+                f"The venv may now hold a broken vllm -- recreate it:  rm -rf {VENV} && uv venv {VENV} --python 3.14 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
                 f"Re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}")
 
 
@@ -549,7 +549,7 @@ def main():
 
     if not PY.is_file():
         ui.fail(f"No python at {PY}",
-                f"create the venv first:  uv venv {VENV} --python 3.12",
+                f"create the venv first:  uv venv {VENV} --python 3.14",
                 "or point VENV at an existing one")
 
     # one run per venv: a concurrent run (or a human with patch) racing
@@ -680,7 +680,7 @@ def main():
                      *failures[bad.name], *extra,
                      "The venv now holds a partially patched vllm: it will not serve until that is fixed",
                      "Rejected hunks are left as .rej files in the tree",
-                     f"Re-run: the next reset wipes the installed tree before reinstalling, so it starts clean; or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
+                     f"Re-run: the next reset wipes the installed tree before reinstalling, so it starts clean; or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.14 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
                      fatal=True)
         else:
             p.finish(True, f"All {len(patches)} patches applied")
@@ -711,7 +711,7 @@ def main():
                 ui.fail(f"{q.stem} failed on the real apply after a clean dry-run",
                         *_output_tail(r),
                         "the tree changed under us -- re-run",
-                        f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
+                        f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.14 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
             ui.ok(q.stem)
             n_applied += 1
 
@@ -728,7 +728,7 @@ def main():
         p.finish(False, "The patched tree does not compile -- vLLM is broken, do not run it",
                  *tail,
                  "Re-run after changing the patch set or the vllm version -- that reset wipes the tree before re-applying",
-                 f"Or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
+                 f"Or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.14 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
                  fatal=True)
     ui.ok(f"Compiled the patched tree in {ui.dur(time.monotonic() - t_c)}")
 

@@ -9,9 +9,9 @@ built-in cache (so re-runs never re-download), plus one file from a third:
   syvai/qwen3.8-27b-3090-fast-variant
       the overlay: int4-GPTQ lm_head (shard 7), int4 MTP module + 40k draft
       head (model_extra_tensors.safetensors), the draft-vocab ids, config, index
-  peculiar-ragdoll/Qwen-Sharp-Chat-Templates
-      one file: chat_template.jinja (Qwen-Sharp v22.4.0) replaces the base
-      checkpoint's stock template (token-efficient thinking and tool calls)
+  froggeric/Qwen-Fixed-Chat-Templates
+      one file: chat_template.jinja (v22.5) replaces the base checkpoint's
+      stock template (fixed thinking, tool calls, and agentic behavior)
 
 The one local step: embed_tokens (~1.3 GB bf16) is requantized to int8
 group-128 symmetric in shard 6, the layout CompressedTensorsEmbeddingWNA16Int
@@ -40,7 +40,7 @@ import _ui as ui
 
 BASE_REPO = "dbirks/Qwen3.8-27B-W4A16-AutoRound"
 FAST_REPO = "syvai/qwen3.8-27b-3090-fast-variant"
-TEMPLATE_REPO = "peculiar-ragdoll/Qwen-Sharp-Chat-Templates"
+TEMPLATE_REPO = "froggeric/Qwen-Fixed-Chat-Templates"
 TEMPLATE_FILE = "chat_template.jinja"
 
 # files from the fast-variant repo that replace/extend the base dir
@@ -140,7 +140,7 @@ def file_ready(dst_path, src_path):
 
 
 def template_ready(dst, tsrc):
-    """True when DEST_DIR already holds the current Qwen-Sharp template."""
+    """True when DEST_DIR already holds the current froggeric template."""
     dst_t = os.path.join(dst, TEMPLATE_FILE)
     if tsrc is None:
         return os.path.isfile(dst_t)  # fetch failed: any template is fine
@@ -304,7 +304,7 @@ def main():
 
     for f in sorted(os.listdir(base)):
         if f in (".gitattributes",) or f in OVERLAY or (f == TEMPLATE_FILE and tsrc is not None):
-            continue  # the Qwen-Sharp template is installed separately below
+            continue  # the froggeric template is installed separately below
         src = os.path.realpath(os.path.join(base, f))
         if f == EMBED_SHARD:
             if embed_done:

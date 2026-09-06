@@ -19,10 +19,10 @@ box; we have not benchmarked these recipes -- run them on your hardware
 before quoting a figure. Most predate the 0.28.0 rebase: upstream has not
 re-measured its 0.28.0 matrix yet (see Notes).
 
-All recipes take image input (no `--language-model-only`): up to 16 images
-per request, each capped at 2097152 px = 2048 tokens. The per-image cap
-(not the count) sets the encoder's profiled peak, which comes out of the
-KV pool; the count only bounds per-request context. The ~0.9 GB vision
+All recipes take image input (no `--language-model-only`), with no
+image-count limit per request; each image is capped at 2097152 px =
+2048 tokens, and that cap sets the encoder's profiled peak, which
+comes out of the KV pool. The ~0.9 GB vision
 tower is offloaded to pinned host RAM by default
 (`VLLM_VISION_CPU_OFFLOAD_GB=1`; `=0` keeps it GPU-resident). They also
 use `--enable-prefix-caching` with `--prefix-caching-hash-algo xxhash`
@@ -156,7 +156,7 @@ first, and GNU `patch` if your distro lacks it:
 `curl -LsSf https://astral.sh/uv/install.sh | sh`):
 
 ```bash
-uv venv .venv --python 3.12
+uv venv .venv --python 3.14
 uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python prepare/patch_vllm.py
 .venv/bin/python prepare/build_fast_model.py models/Qwen3.8-27B-W4A16-AutoRound-fast
@@ -276,18 +276,21 @@ n-gram chains are in the set (both off by default) — adopted in this sync.
   +5.3% end-to-end prefill upstream, but only with bf16 KV, so it applies
   to w4a16-bf16-dflash2 here; on its own it is "within a few percent
   either way" (upstream #62), the gain compounds with the int8-GEMM lane.
-- **`VLLM_MARLIN_TUNE=1`** (off by default): routes `marlin_gemm` through
-  a separately built tunable Marlin extension (build per the patch header,
-  install its path as a `.pth` in the venv); a no-op without the build.
-  Worth it for W4A8 prefill (+2-20% per GEMM at M≥1024) and +3-7% on the
-  M≤16 verify GEMMs of every Marlin recipe.
+- **`VLLM_MARLIN_TUNE=1`** (off by default; we leave it off): routes
+  `marlin_gemm` through a separately built tunable Marlin extension;
+  a no-op without that build. We are not building it: upstream measured
+  +2-20% per GEMM on W4A8 prefill, but ~+0.4% end-to-end at the 250 W
+  cap (and the build's source tree is in neither git repo), so stock
+  is the right default on this hardware. Uncapped cards would
+  additionally gain +3-7% on the M≤16 verify GEMMs.
 - **TP=2**: upstream measured +16–35% decode at C1 vs one 3090 (PCIe x8,
   no NVLink); DFlash2 wins at every concurrency on two cards, and the
   15-draft block lost 27% at TP=2 — keep 7.
-- **Chat template**: the prep replaces the stock template with Qwen-Sharp
-  v22.4.0 (token-efficient thinking and tool calls); per-request variables
-  — `enable_thinking`, `reasoning_effort`, `tool_call_format`, … — go
-  through `chat_template_kwargs`.
+- **Chat template**: the prep replaces the stock template with
+  froggeric's v22.5 (fixed thinking, tool calls, and agentic behavior
+  across Qwen 3.5/3.6/3.8); per-request variables — `enable_thinking`,
+  `reasoning_effort`, `tool_call_format`, … — go through
+  `chat_template_kwargs`.
 - First start compiles (torch.compile, CUDA graphs); the caches live in
   `$HOME` (the `/cache` volume in Docker), so it happens once.
 - Sampling: Qwen recommends 0.7 / top_p 0.8 for instruct, 1.0 / 0.95 with
