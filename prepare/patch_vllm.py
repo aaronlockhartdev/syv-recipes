@@ -18,8 +18,9 @@ no-op:
 When the hash no longer matches -- you pulled or edited patches, the
 venv's vllm changed, or the tree was edited after the audit -- the old
 patch set cannot be reversed (its bytes are gone), so the script
-reinstalls vllm pristine (uv, from its cache) and re-applies the
-current set. The same reset recovers a venv interrupted mid-patch. A
+wipes the installed vllm and reinstalls it pristine (uv, from its
+cache), then re-applies the current set. The same reset recovers a
+venv interrupted mid-patch. A
 venv that is already fully patched but not yet stamped (first run of
 this script on an old venv) is just stamped.
 
@@ -30,26 +31,42 @@ target file, within 256 lines of the hunk's nominal position. A hunk is
 APPLIED when only its new image is in place, FRESH when only its old
 one is, CONFLICT when neither -- or both -- are. A match found farther
 away than that does not count: at that distance it is not this hunk (a
-repeated block elsewhere in the file), and acting on it would patch
-the wrong location or bless a corrupted one. No verdict depends on GNU
-patch's phrasing or on this particular patch set: any unified-diff
-patches audit the same way, and every ambiguity resolves to the loud
-reset, never to a silent guess. A FRESH patch additionally gets a
-forward dry-run (the one place a real `patch` is consulted) before
-anything is applied for real.
+repeated block elsewhere in the file), and acting on it would bless a
+corrupted tree. No verdict depends on GNU patch's phrasing or on this
+particular patch set: any unified-diff patches audit the same way, and
+every ambiguity resolves to the loud reset, never to a silent guess.
+The test is exact-match and fuzz-free, so it is deliberately stricter
+than GNU patch itself: a hunk can apply under patch's default fuzz and
+offset search and still read as CONFLICT here (hybrid-sw-block-promote
+on 0.28.0: the first hunk was written against an intermediate 0.28.0
+snapshot; the final wheel lost one of its context lines and moved 34
+lines -- patch takes it at fuzz 1, offset -34). The verdicts therefore
+only steer, and never gate, the application.
 
 The states, then, tested in order on a hardlinked mirror of the tree
 (only files that change get materialized):
-  1. forward chain: every patch is FRESH (apply it, keep going -- this
-     handles a fresh venv and a crash between patches, since a later
-     patch that needs a file created by an earlier one is judged after
-     the earlier one is in) or APPLIED (skip);
+  1. forward chain: every patch is FRESH (applied to the real tree,
+     each re-verified there first -- a fresh venv, or a crash between
+     patches, since a later patch that needs a file created by an
+     earlier one is judged after the earlier one is in) or APPLIED
+     (skipped); a FRESH patch additionally gets a forward dry-run on
+     the mirror before it is applied for real;
   2. reverse cascade: every patch is APPLIED and reverse-applies,
      walked last to first -- the exact inverse of the build, the only
      order that undoes patches that overlap in the same file (a fully
      patched tree: just stamp it, nothing is touched);
-  3. neither: the tree is inconsistent -- reset (reinstall pristine,
-     re-apply, stamp).
+  3. neither -- or the stamp no longer matches: reset. the installed
+     vllm is wiped and reinstalled pristine, then the whole set is
+     applied in place with
+     plain `patch -p1 -d <venv>/vllm`, in build order -- the form each
+     patch file's own "Apply" recipe documents (the Dockerfile runs
+     the same loop with `--batch`, aborting on first failure), where
+     GNU patch's own result -- including its default fuzz and offset
+     search -- is authoritative and the content verdicts are not
+     consulted. A hunk
+     that fails against pristine fails loudly, with its .rej file left
+     in the tree as evidence; the venv is left as it is, and the
+     re-run/reset hints say how to recover.
 
 The Dockerfile builds its image with the same sequence: apply in
 alphabetical order, then a compileall gate. GNU patch is required for
@@ -372,6 +389,21 @@ def apply_real(p, sp, reverse=False):
     except FileNotFoundError:
         ui.fail("The patch tool is not on PATH", "install it:  apt install patch")
 
+def apply_plain(p, sp):
+    """The reference application: `patch -p1 -d <sp>` with the patch on
+    stdin -- no --batch, no --dry-run -- the manual loop this set is
+    written and validated against. Only called on a freshly reinstalled
+    (pristine) tree, where no hunk is already in place, so patch never
+    needs to ask anything; its own result is authoritative here, and
+    its default fuzz and offset search take hunks the exact-match
+    content test cannot see (see the module docstring)."""
+    try:
+        with open(p, "rb") as fh:
+            return subprocess.run([PATCH, "-p1", "-d", str(sp)],
+                                  stdin=fh, capture_output=True, text=True)
+    except FileNotFoundError:
+        ui.fail("The patch tool is not on PATH", "install it:  apt install patch")
+
 
 def _output_tail(r):
     """The last lines of a failed patch run -- the hunk evidence."""
@@ -459,13 +491,24 @@ def reverse_cascade(patches, sp, tick=None):
         shutil.rmtree(root, ignore_errors=True)
 
 
-def reinstall(version):
+def reinstall(version, sp):
     if version == "unknown":
         ui.fail("The vllm version is not readable, so it cannot be reinstalled",
                 f"Recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
     if shutil.which("uv") is None:
         ui.fail("The uv tool is not on PATH (needed to reinstall vllm)",
                 "one time:  curl -LsSf https://astral.sh/uv/install.sh | sh")
+    # a truly pristine tree: wipe what is installed first. uv's uninstall
+    # only knows the wheel's own RECORD, so anything the patch set ever
+    # created (new files, .orig artifacts) would otherwise survive and
+    # collide with the create-sections of the next run
+    if sp.is_dir():
+        shutil.rmtree(sp, ignore_errors=True)
+    for di in sp.parent.glob("vllm-*.dist-info"):
+        shutil.rmtree(di, ignore_errors=True)
+    if sp.exists():
+        ui.fail(f"Could not fully remove the installed vllm at {sp}",
+                "fix its permissions, or point VENV at a fresh venv, then re-run")
     ui.note(f"Reinstalling vllm {version} pristine (uv, from its cache)")
     # uv resolves the pin against its index (PyPI by default): this venv
     # was created from requirements.txt (by setup.py or the Dockerfile),
@@ -554,6 +597,7 @@ def main():
     # --- decide what state the tree is in --------------------------------
     ui.stage("Auditing the tree")
     reset = False
+    n_applied = 0
     verdicts = None
     parts = old.split() if old else []
     old_v = parts[0] if len(parts) >= 1 else None
@@ -600,52 +644,76 @@ def main():
     if reset:
         ui.stage(f"Resetting vllm {version}")
         t_r = time.monotonic()
-        reinstall(version)
+        reinstall(version, sp)
         clean_junk(sp)
         ui.ok(f"Pristine vllm {version} in place in {ui.dur(time.monotonic() - t_r)}")
-        p = ui.Progress(f"Verifying {len(patches)} patches against the pristine tree", total=len(patches))
+        # The reference application: plain `patch -p1 -d` on the real
+        # tree, in build order -- the manual loop this set is written
+        # and validated against. GNU patch's own result is authoritative
+        # here; the exact-match content verdicts from the audit above
+        # are deliberately not consulted (a hunk patch takes with its
+        # default fuzz can read as CONFLICT to them -- see the
+        # docstring). A failure leaves the tree partially patched,
+        # loudly, with .rej files as evidence.
+        p = ui.Progress(f"Applying {len(patches)} patches to the pristine tree",
+                        total=len(patches))
+        verdicts = {}
         failures = {}
-        mirror, mroot = make_mirror(sp)  # mirror the freshly reinstalled tree
-        try:
-            verdicts, forward_ok = forward_chain(patches, mirror, apply_to=mirror, tick=p.tick, failures=failures)
-        finally:
-            shutil.rmtree(mroot, ignore_errors=True)
-        if not forward_ok:
-            bad = next((q for q in patches if verdicts[q.name] == CONFLICT), patches[-1])
+        for q in patches:
+            r = apply_plain(q, sp)
+            p.tick()
+            if r.returncode == 0:
+                verdicts[q.name] = APPLIED
+                ui.ok(q.stem)
+                n_applied += 1
+            else:
+                verdicts[q.name] = CONFLICT
+                failures[q.name] = _output_tail(r)
+        if failures:
+            bad = next(q for q in patches if verdicts[q.name] == CONFLICT)
+            extra = []
+            if len(failures) > 1:
+                more = ", ".join(q.stem for q in patches
+                                 if q.name in failures and q.name != bad.name)
+                extra = [f"{len(failures) - 1} more patches failed: {more}"]
             p.finish(False, f"{bad.stem} fails even against pristine vllm {version}",
-                     *failures.get(bad.name, []),
-                     "The patch does not match this vllm release -- rebase it against the pinned one",
-                     "The venv now holds pristine, unpatched vllm: it will not serve until that is fixed",
-                     f"Re-run:  {PY} {REPO / 'prepare' / 'patch_vllm.py'}",
+                     *failures[bad.name], *extra,
+                     "The venv now holds a partially patched vllm: it will not serve until that is fixed",
+                     "Rejected hunks are left as .rej files in the tree",
+                     f"Re-run: the next reset wipes the installed tree before reinstalling, so it starts clean; or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
                      fatal=True)
+        else:
+            p.finish(True, f"All {len(patches)} patches applied")
 
     # --- apply (or confirm) ---------------------------------------------
-    n_fresh = sum(1 for q in patches if verdicts[q.name] == FRESH)
-    if n_fresh:
-        ui.stage(f"Applying {n_fresh} of {len(patches)} patches")
-    n_applied = 0
-    for q in patches:
-        v = verdicts[q.name]
-        if v == APPLIED:
-            ui.note(f"{q.stem} (already applied)")
-            continue
-        if v != FRESH:
-            ui.fail(f"{q.stem} could not be applied (no clean direction found)",
-                    "re-run, or recreate the venv if it keeps happening")
-        # the verdicts came from a mirror; confirm against the real tree
-        # so a change made since the audit (by a second run, a human, or
-        # another tool) cannot be written over -- the next run converges
-        if classify(q, sp) != FRESH:
-            ui.fail(f"{q.stem}: the tree changed under us since the audit",
-                    "re-run -- it converges from the current state")
-        r = apply_real(q, sp)
-        if r.returncode != 0:
-            ui.fail(f"{q.stem} failed on the real apply after a clean dry-run",
-                    *_output_tail(r),
-                    "the tree changed under us -- re-run",
-                    f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
-        ui.ok(q.stem)
-        n_applied += 1
+    if reset and n_applied == len(patches):
+        pass  # the reset loop above applied the whole set in place already
+    else:
+        n_fresh = sum(1 for q in patches if verdicts[q.name] == FRESH)
+        if n_fresh:
+            ui.stage(f"Applying {n_fresh} of {len(patches)} patches")
+        for q in patches:
+            v = verdicts[q.name]
+            if v == APPLIED:
+                ui.note(f"{q.stem} (already applied)")
+                continue
+            if v != FRESH:
+                ui.fail(f"{q.stem} could not be applied (no clean direction found)",
+                        "re-run, or recreate the venv if it keeps happening")
+            # the verdicts came from a mirror; confirm against the real tree
+            # so a change made since the audit (by a second run, a human, or
+            # another tool) cannot be written over -- the next run converges
+            if classify(q, sp) != FRESH:
+                ui.fail(f"{q.stem}: the tree changed under us since the audit",
+                        "re-run -- it converges from the current state")
+            r = apply_real(q, sp)
+            if r.returncode != 0:
+                ui.fail(f"{q.stem} failed on the real apply after a clean dry-run",
+                        *_output_tail(r),
+                        "the tree changed under us -- re-run",
+                        f"or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}")
+            ui.ok(q.stem)
+            n_applied += 1
 
     clean_junk(sp)
     p = ui.Progress("Compiling the patched tree")
@@ -659,7 +727,7 @@ def main():
                 if l.strip()][-8:] or ["(no output from compileall)"]
         p.finish(False, "The patched tree does not compile -- vLLM is broken, do not run it",
                  *tail,
-                 f"Reset vllm and re-run:  uv pip install --python {PY} --force-reinstall --no-deps vllm=={version.split('+')[0]} && {PY} {REPO / 'prepare' / 'patch_vllm.py'}",
+                 "Re-run after changing the patch set or the vllm version -- that reset wipes the tree before re-applying",
                  f"Or recreate the venv:  rm -rf {VENV} && uv venv {VENV} --python 3.12 && uv pip install --python {PY} -r {REPO / 'requirements.txt'}",
                  fatal=True)
     ui.ok(f"Compiled the patched tree in {ui.dur(time.monotonic() - t_c)}")
