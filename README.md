@@ -183,7 +183,7 @@ patches below extend the native implementation instead.
 - `marlin-int8-layer-select.patch` -- env-selectable int8-activation layers for the Marlin path (the w4a8-int8-dflash2 recipe)
 - `marlin-int8-negative-scales.patch` — correctness fix for negative group scales in W4A8
 - `marlin-repack-staged-sm80.patch` — staged Marlin repack (load-time allocation hygiene; the header records #27's corrected history — the old "VMM churn" theory was disproven)
-- `marlin-tune-table.patch` — routes `marlin_gemm` through the tuned Marlin extension (the recipes enable it automatically when it is importable; `VLLM_MARLIN_TUNE=0` opts out; `prepare/build_marlin_tune.py` builds it): +3-7% on the M≤16 decode/verify GEMMs, +2-20% on W4A8 chunked-prefill GEMMs
+- `marlin-tune-table.patch` — routes `marlin_gemm` through a locally built tunable Marlin extension (`VLLM_MARLIN_TUNE=1`, a no-op without that build): +3-7% on the M≤16 decode/verify GEMMs, +2-20% on W4A8 chunked-prefill GEMMs
 - `mamba-align-checkpoint-order.patch` — retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238). Ships default off; all five recipes default it on (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`)
 - `mamba-chunked-prefill-align.patch` — correctness fix: GDN/Mamba state loss and NaN during chunked prefill (the state-copy source column, and an uninitialized-memory mask in the flash-linear-attention chunk-o kernel)
 - `offload-dflash-eagle-groups.patch` — OffloadingConnector group flagging under dflash
@@ -276,16 +276,11 @@ n-gram chains are in the set (both off by default) — adopted in this sync.
   +5.3% end-to-end prefill upstream, but only with bf16 KV, so it applies
   to w4a16-bf16-dflash2 here; on its own it is "within a few percent
   either way" (upstream #62), the gain compounds with the int8-GEMM lane.
-- **Tuned Marlin** (`prepare/build_marlin_tune.py [SRC_DIR] [--rebench]`):
-  builds the tunable Marlin extension (a standalone build of the same
-  Marlin source with a measured tile table -- its source tree is local
-  build state, excluded from both git repos, so pass a path or
-  `MARLIN_TUNE_SRC`) and installs it into the venv; the recipes enable
-  `VLLM_MARLIN_TUNE` automatically when it is importable (`=0` opts out).
+- **`VLLM_MARLIN_TUNE=1`** (off by default): routes `marlin_gemm` through
+  a separately built tunable Marlin extension (build per the patch header,
+  install its path as a `.pth` in the venv); a no-op without the build.
   Worth it for W4A8 prefill (+2-20% per GEMM at M≥1024) and +3-7% on the
-  M≤16 verify GEMMs of every Marlin recipe -- but upstream measured only
-  ~+0.4% end-to-end at the 250 W cap: on a power-capped 3090 the gains
-  wash out, so it mainly pays on uncapped cards.
+  M≤16 verify GEMMs of every Marlin recipe.
 - **TP=2**: upstream measured +16–35% decode at C1 vs one 3090 (PCIe x8,
   no NVLink); DFlash2 wins at every concurrency on two cards, and the
   15-draft block lost 27% at TP=2 — keep 7.

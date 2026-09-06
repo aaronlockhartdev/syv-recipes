@@ -102,14 +102,6 @@ export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=${VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS:-1}
 # keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-# tuned Marlin (patches/marlin-tune-table.patch, built by
-# prepare/build_marlin_tune.py): auto-enable when the extension is
-# importable; VLLM_MARLIN_TUNE=0 keeps it off. Upstream measured
-# +2-20% per GEMM but only ~+0.4% end-to-end at a 250 W cap
-if [ -z "${VLLM_MARLIN_TUNE:-}" ] && "${VENV}/bin/python" -c 'import marlin_best, marlin_tune_ext' >/dev/null 2>&1; then
-  export VLLM_MARLIN_TUNE=1
-fi
-
 # no --language-model-only: the server takes image input.
 # Vision: up to 16 images per request, each capped at 2097152 px = 2048
 # tokens -- the cap (not the count) sets the encoder's profiled peak in

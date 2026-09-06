@@ -107,7 +107,7 @@ combination is new to the matrix).
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
 recipes/ the five *.sh
-prepare/ build_fast_model.py, build_marlin_tune.py, fetch_dflash2.py, patch_vllm.py, _ui.py
+prepare/ build_fast_model.py, fetch_dflash2.py, patch_vllm.py, _ui.py
 patches/ the 28 synced patches
 ```
 
