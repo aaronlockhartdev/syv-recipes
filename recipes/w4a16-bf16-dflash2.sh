@@ -8,6 +8,12 @@
 # CUDA-graph capture is safe with it (all 128 prefix-cache residues swept
 # clean), so this recipe does not force PIECEWISE like w4a16-int8-mtp does.
 #
+# One deviation: --max-num-batched-tokens 8192 (upstream ships 2048; its
+# batch lane measured 2048 beating 8192 -- bigger chunks inflate the
+# profiled activation peak, which shrinks the KV/state page pool). We
+# accept the smaller pool for half the prefill steps. The 8 slots and the
+# 64 capture size are the launcher's own CTX=fast defaults at k=7.
+#
 # The trade vs w4a16-int8-dflash2: bf16 KV is 2x the bytes of int8, so the
 # same VRAM pool holds ~half the context, and prefill is slower (FA2, no int8 KV path).
 # It is the quality baseline -- no quantized-KV approximation anywhere.
@@ -98,19 +104,19 @@ exec vllm serve "$MODEL" \
   --tensor-parallel-size 2 \
   --gpu-memory-utilization 0.93 \
   --max-model-len auto \
-  --max-num-seqs 4 \
+  --max-num-seqs 8 \
   --api-server-count 1 \
   --attention-backend FLASH_ATTN \
   --kv-cache-dtype bfloat16 \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 8192 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}' \
-  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --compilation-config '{"max_cudagraph_capture_size":64,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_xml

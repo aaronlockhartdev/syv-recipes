@@ -4,7 +4,7 @@
 #
 # Flags are what the upstream launcher produced for
 #   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
-# with three deviations:
+# with four deviations:
 #   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
 #      -- same per-token width, ~2x the pool of bf16.
 #   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
@@ -16,6 +16,11 @@
 #      in 128 (here: length % 128 == 4) returns "" / "#" or fluent wrong
 #      text. Upstream forced PIECEWISE for MTP for correctness; at the
 #      served lengths it costs nothing measured.
+#   4. --max-num-batched-tokens 8192 (upstream ships 2048; its batch lane
+#      measured 2048 beating 8192 -- bigger chunks inflate the profiled
+#      activation peak, which shrinks the KV/state page pool). We accept
+#      the smaller pool for half the prefill steps. (--max-num-seqs 8 and
+#      the 32 capture size are the launcher's own MTP values.)
 #
 # The env vars support the patch stack; the vllm line is the complete
 # server configuration.
@@ -100,7 +105,7 @@ exec vllm serve "$MODEL" \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 8192 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \

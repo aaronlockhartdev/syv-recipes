@@ -2,10 +2,23 @@
 # w4a16-int8-dflash2 (the default): DFlash2 drafter (7 drafts in one pass),
 # TP=2, prefix caching, int8 per-token-head KV, vision enabled.
 #
-# Flags are exactly what the upstream launcher produced for
+# Flags are what the upstream launcher produced for
 #   SPEC=dflash2 CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
 # (DFLASH_TOKENS=7 is its default), minus the single-card KV_MEM pin -- under
 # TP>1 the launcher drops it and sizes the KV pool from gpu-memory-utilization.
+# Two deviations from the launcher values:
+#   1. --max-num-seqs 8 (upstream's CTX=long ships 4 -- it keeps 4 slots when
+#      the block is long, for the graphs); max_cudagraph_capture_size goes
+#      32 -> 64 with it, the launcher's own formula at 8 slots (8 x the
+#      8-token verify block) -- at 32 an 8-request decode batch would run
+#      piecewise, ~8% slower (upstream's CTX=fast note). The
+#      VLLM_V2_CUDAGRAPH_MEM_MIB reservation stays 1400: upstream sizes it
+#      identically at k<=7 for 4 and 8 slots (1900 only above 7 drafts).
+#   2. --max-num-batched-tokens 8192 (upstream ships 2048). Its batch lane
+#      measured 2048 beating 8192: bigger chunks inflate the profiled
+#      activation peak, which shrinks the KV/state page pool. We accept the
+#      smaller pool for half the prefill steps (16k prompt: two steps,
+#      not four at 4096).
 #
 # The env vars support the patch stack; the vllm line is the complete
 # server configuration.
@@ -96,19 +109,19 @@ exec vllm serve "$MODEL" \
   --tensor-parallel-size 2 \
   --gpu-memory-utilization 0.93 \
   --max-model-len auto \
-  --max-num-seqs 4 \
+  --max-num-seqs 8 \
   --api-server-count 1 \
   --attention-backend TRITON_ATTN \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 8192 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}' \
-  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --compilation-config '{"max_cudagraph_capture_size":64,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_xml

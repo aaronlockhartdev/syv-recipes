@@ -24,6 +24,14 @@
 # and PPL +4.1%, mostly prose, code flat. The GDN-only middle
 # (mlp|linear_attn) crashes at first forward on this torch/vLLM combo --
 # an inductor codegen bug; use mlp or all.
+#
+# Two deviations shared with w4a16-int8-dflash2 (full note in its header):
+# --max-num-seqs 8 (upstream's CTX=long ships 4; max_cudagraph_capture_size
+# goes 32 -> 64 with it, the launcher's own formula at 8 slots) and
+# --max-num-batched-tokens 8192 (upstream ships 2048; its batch lane
+# measured 2048 beating 8192 -- bigger chunks inflate the profiled
+# activation peak, which shrinks the KV/state page pool; we accept the
+# smaller pool for half the prefill steps).
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
@@ -117,19 +125,19 @@ exec vllm serve "$MODEL" \
   --tensor-parallel-size 2 \
   --gpu-memory-utilization 0.93 \
   --max-model-len auto \
-  --max-num-seqs 4 \
+  --max-num-seqs 8 \
   --api-server-count 1 \
   --attention-backend TRITON_ATTN \
   --kv-cache-dtype int8_per_token_head \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 8192 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}' \
-  --compilation-config '{"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --compilation-config '{"max_cudagraph_capture_size":64,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_xml

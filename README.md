@@ -29,7 +29,7 @@ use `--enable-prefix-caching` with `--prefix-caching-hash-algo xxhash`
 (the `xxhash` package is in requirements.txt),
 `--gpu-memory-utilization 0.93` (under TP>1 the pool is sized from
 utilization), `--mamba-ssm-cache-dtype float16` (halves the GDN state
-cost), `--max-num-batched-tokens 4096`, the qwen3 reasoning parser,
+cost), `--max-num-seqs 8` and `--max-num-batched-tokens 8192`, the qwen3 reasoning parser,
 qwen3_xml tool parsing, and `--enable-prompt-tokens-details`, so every
 response's `usage.prompt_tokens_details.cached_tokens` shows how much of
 the prompt the prefix cache served. Port 8080 (`PORT=…`) and a `.venv` at
