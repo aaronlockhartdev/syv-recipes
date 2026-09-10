@@ -5,6 +5,7 @@
 #   w4a16-bf16-dflash2  recipes/w4a16-bf16-dflash2.sh  -- unquantized KV, FlashAttention
 #   w4a16-int4-dflash2  recipes/w4a16-int4-dflash2.sh  -- int4 KV, ~2x the context capacity
 #   w4a8-int8-dflash2   recipes/w4a8-int8-dflash2.sh   -- W4A8 linears, faster prefill
+#   w4a16-int8-dspark   recipes/w4a16-int8-dspark.sh   -- DSpark community drafter (opt-in)
 #   prepare             docker/prepare.sh              (download + build the models into /app/models)
 #   <anything else> is exec'd as a command (e.g. bash)
 # Before serving, docker/prepare.sh runs (idempotent) unless PREPARE=0.
@@ -12,8 +13,11 @@ set -e
 cd /app
 export PATH=/app/.venv/bin:$PATH
 cmd=${1:-w4a16-int8-dflash2}; shift || true
+# the dspark arm's prepare also fetches its own drafter checkpoint (opt-in:
+# the ~3.7 GB DSpark checkpoint is not part of the default prep)
+[ "$cmd" = w4a16-int8-dspark ] && [ -z "${DSPARK:-}" ] && export DSPARK=1
 case "$cmd" in
-  w4a16-int8-dflash2|w4a16-int8-mtp|w4a16-bf16-dflash2|w4a16-int4-dflash2|w4a8-int8-dflash2)
+  w4a16-int8-dflash2|w4a16-int8-mtp|w4a16-bf16-dflash2|w4a16-int4-dflash2|w4a8-int8-dflash2|w4a16-int8-dspark)
     if [ "${PREPARE:-1}" != "0" ]; then bash docker/prepare.sh; fi
     exec bash "recipes/$cmd.sh" "$@" ;;
   prepare) exec bash docker/prepare.sh "$@" ;;

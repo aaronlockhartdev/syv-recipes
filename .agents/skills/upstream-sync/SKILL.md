@@ -132,7 +132,7 @@ One block per feature, in this shape:
 FEATURE: <name>   (upstream <sha> / PR #NN / issue #NN)
   what:        <1–2 lines, from the upstream commit message or docs>
   measured:    <upstream's numbers on their reference box — always labeled theirs>
-  impact here: <which of the five recipes / matrix cells it touches,
+  impact here: <which of the six recipes / matrix cells it touches,
                and what it means on 2x3090 TP=2, 24 GB>
   call:        adopt | skip | watch — <recommendation and why>
 ```

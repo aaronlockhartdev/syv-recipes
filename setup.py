@@ -7,7 +7,9 @@ it finds; the prep scripts are idempotent by design). No positional
 args; the three destinations come from env vars of the same names the
 recipe scripts use (defaults: ./.venv,
 models/Qwen3.8-27B-W4A16-AutoRound-fast,
-models/Qwen3.8-27B-DFlash2-W4A16).
+models/Qwen3.8-27B-DFlash2-W4A16); DSPARK=1 (or a path) also fetches the
+optional bf16 DSpark drafter (models/Qwen3.8-27B-DSpark) for the
+w4a16-int8-dspark recipe.
 
 Runs under any python3 (the venv does not exist yet); it shells out to
 uv and to the venv's own python for the rest.
@@ -146,6 +148,22 @@ def main():
         [PY, REPO / "prepare" / "fetch_dflash2.py", DRAFT],
     )
 
+    # opt-in: DSPARK=1 (default dir) or DSPARK=/path fetches the bf16 DSpark
+    # community drafter for recipes/w4a16-int8-dspark.sh (~3.7 GB more)
+    dspark = (os.environ.get("DSPARK") or "").strip()
+    if dspark in ("0", "false", "no"):
+        dspark = ""
+    if dspark:
+        dst = (
+            REPO / "models" / "Qwen3.8-27B-DSpark"
+            if dspark in ("1", "true", "yes")
+            else Path(dspark)
+        ).expanduser()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            "Fetching the DSpark drafter",
+            [PY, REPO / "prepare" / "fetch_dspark.py", dst],
+        )
     ui.done(f"Ready -- serve with:  bash {REPO / 'recipes' / 'w4a16-int8-dflash2.sh'}   (or any of recipes/)")
 
 

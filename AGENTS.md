@@ -17,7 +17,7 @@ packaging. A change here that conflicts with an upstream technical fact
 needs upstream evidence for it, or an explicit "deviation from upstream"
 disclosure in the recipe header (there are three known ones, all disclosed).
 
-## The five recipes
+## The six recipes
 
 | recipe | stack | one-liner |
 |---|---|---|
@@ -26,6 +26,7 @@ disclosure in the recipe header (there are three known ones, all disclosed).
 | `w4a16-bf16-dflash2` | FLASH_ATTN, bf16 KV, dflash2 | the unquantized quality baseline |
 | `w4a16-int4-dflash2` | TRITON_ATTN, int4 KV, dflash2, `--prefix-match-unit 848` | ~2x the context capacity |
 | `w4a8-int8-dflash2` | dflash2 + W4A8 Marlin linears (INT8_LAYERS) | faster prefill, documented quality cost |
+| `w4a16-int8-dspark` | TRITON_ATTN, int8 KV, DSpark bf16 community drafter (RadixArk) | opt-in: upstream-measured slower than the dflash2 head on their shape; unmeasured on ours |
 
 Naming scheme: `[model_quant]-[kv]-[spec_decode_method]`. Do not break it.
 Adding a recipe = a new file following the scheme, an arm in
@@ -34,7 +35,7 @@ combination is new to the matrix).
 
 ## Invariants
 
-- **`patches/` is the synced set (28).** They apply in alphabetical = build
+- **`patches/` is the synced set (29).** They apply in alphabetical = build
   order because later patches depend on files created by earlier ones.
   They are the upstream files verbatim (`upstream/synced` names the
   upstream commit they come from); their headers carry the provenance
@@ -61,11 +62,12 @@ combination is new to the matrix).
   W4A16 draft-checkpoint support (packed-qkv dequant, quantized lm_head
   sharing) that serving this model needs — do not trim it on the
   assumption it is just an option.
-- **A dflash2 speculative-config must set `draft_sample_method`** (upstream
+- **A speculative-config for a drafter must set `draft_sample_method`** (upstream
   #73): on 0.28.0 the native speculator base allocates the draft-logits
   buffer only when the config asks; without it the rejection test loses
   its denominator and acceptance drops ~16% (101.4 vs 121.7 tok/s
-  upstream). All four dflash2 recipes set it to probabilistic.
+  upstream). All five drafter recipes (the four dflash2 and the dspark) set
+  it to probabilistic; the MTP recipe has always set it.
 - **Vision is on** (no `--language-model-only`) — two 24 GB cards are not
   VRAM-limited; the tower offloads to pinned host RAM by default
   (`VLLM_VISION_CPU_OFFLOAD_GB=1`) since dflash2 + vision OOMs at graph
@@ -106,9 +108,9 @@ combination is new to the matrix).
 ```
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
-recipes/ the five *.sh
-prepare/ build_fast_model.py, fetch_dflash2.py, patch_vllm.py, _ui.py
-patches/ the 28 synced patches
+recipes/ the six *.sh
+prepare/ build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py, _ui.py
+patches/ the 29 synced patches
 ```
 
 Defaults: venv `.venv/`, models under `models/`, port 8080, and `Qwen3.8-
