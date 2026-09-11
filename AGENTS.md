@@ -26,7 +26,7 @@ disclosure in the recipe header (there are three known ones, all disclosed).
 | `w4a16-bf16-dflash2` | FLASH_ATTN, bf16 KV, dflash2 | the unquantized quality baseline |
 | `w4a16-int4-dflash2` | TRITON_ATTN, int4 KV, dflash2, `--prefix-match-unit 848` | ~2x the context capacity |
 | `w4a8-int8-dflash2` | dflash2 + W4A8 Marlin linears (INT8_LAYERS) | faster prefill, documented quality cost |
-| `w4a16-int8-dspark` | TRITON_ATTN, int8 KV, DSpark bf16 community drafter (RadixArk) | opt-in: upstream-measured slower than the dflash2 head on their shape; unmeasured on ours |
+| `w4a16-int8-dspark` | TRITON_ATTN, int8 KV, DSpark bf16 community drafter (RadixArk) | upstream-measured slower than the dflash2 head on their shape; unmeasured on ours |
 
 Naming scheme: `[model_quant]-[kv]-[spec_decode_method]`. Do not break it.
 Adding a recipe = a new file following the scheme, an arm in
@@ -35,7 +35,7 @@ combination is new to the matrix).
 
 ## Invariants
 
-- **`patches/` is the synced set (29).** They apply in alphabetical = build
+- **`patches/` is the synced set (30).** They apply in alphabetical = build
   order because later patches depend on files created by earlier ones.
   They are the upstream files verbatim (`upstream/synced` names the
   upstream commit they come from); their headers carry the provenance
@@ -72,6 +72,14 @@ combination is new to the matrix).
   VRAM-limited; the tower offloads to pinned host RAM by default
   (`VLLM_VISION_CPU_OFFLOAD_GB=1`) since dflash2 + vision OOMs at graph
   capture on 24 GB without it.
+- **DSpark is a community checkpoint, not ours**: RadixArk/Qwen3.8-27B-DSpark
+  (bf16, 7 drafts/step) is fetched in every setup (`setup.py`,
+  `docker/prepare.sh`; `DSPARK=/path` redirects, `=0/false/no` skips). The
+  fetch rewrites the checkpoint's config.json architecture to
+  Qwen3DSparkModel (0.28.0 maps the published name to the DeepSeek V4
+  class), hard-links the weights, and copies the checkpoint's own
+  dspark.py/dflash.py so the installed dir stays self-contained; an
+  interrupted (partial) cache is completed, never treated as warm.
 
 - **Mamba align-snapshot retention is on by default**
   (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` in every recipe — the patch
@@ -110,7 +118,7 @@ Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
 recipes/ the six *.sh
 prepare/ build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py, _ui.py
-patches/ the 29 synced patches
+patches/ the 30 synced patches
 ```
 
 Defaults: venv `.venv/`, models under `models/`, port 8080, and `Qwen3.8-

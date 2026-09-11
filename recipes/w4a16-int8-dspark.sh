@@ -1,5 +1,5 @@
 #!/bin/bash
-# w4a16-int8-dspark (opt-in): the community DSpark drafter
+# w4a16-int8-dspark: the community DSpark drafter
 # (RadixArk/Qwen3.8-27B-DSpark, bf16, 7 drafts per step) on the exact stack of
 # w4a16-int8-dflash2 -- TP=2, prefix caching, int8 per-token-head KV, vision
 # enabled. Only the drafter model and the speculative method differ.

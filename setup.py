@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """One-shot bare-metal setup: venv + pinned deps + the vllm patches +
-both model dirs.
+all three model dirs.
 
 Idempotent -- re-run it any time (patch_vllm.py converges whatever state
 it finds; the prep scripts are idempotent by design). No positional
-args; the three destinations come from env vars of the same names the
+args; the destinations come from env vars of the same names the
 recipe scripts use (defaults: ./.venv,
 models/Qwen3.8-27B-W4A16-AutoRound-fast,
-models/Qwen3.8-27B-DFlash2-W4A16); DSPARK=1 (or a path) also fetches the
-optional bf16 DSpark drafter (models/Qwen3.8-27B-DSpark) for the
-w4a16-int8-dspark recipe.
+models/Qwen3.8-27B-DFlash2-W4A16,
+models/Qwen3.8-27B-DSpark); every setup fetches all three by
+default -- DSPARK=/path redirects the DSpark dir, DSPARK=0 skips it.
 
 Runs under any python3 (the venv does not exist yet); it shells out to
 uv and to the venv's own python for the rest.
@@ -148,15 +148,12 @@ def main():
         [PY, REPO / "prepare" / "fetch_dflash2.py", DRAFT],
     )
 
-    # opt-in: DSPARK=1 (default dir) or DSPARK=/path fetches the bf16 DSpark
-    # community drafter for recipes/w4a16-int8-dspark.sh (~3.7 GB more)
+    # fetched by default: DSPARK=/path redirects, DSPARK=0/false/no skips
     dspark = (os.environ.get("DSPARK") or "").strip()
-    if dspark in ("0", "false", "no"):
-        dspark = ""
-    if dspark:
+    if dspark not in ("0", "false", "no"):
         dst = (
             REPO / "models" / "Qwen3.8-27B-DSpark"
-            if dspark in ("1", "true", "yes")
+            if not dspark or dspark in ("1", "true", "yes")
             else Path(dspark)
         ).expanduser()
         dst.parent.mkdir(parents=True, exist_ok=True)

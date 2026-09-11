@@ -4,7 +4,9 @@
 RadixArk/Qwen3.8-27B-DSpark (1.86 B params, ~3.7 GB bf16), the community
 drafter vLLM 0.28.0 serves through its native "dspark" speculative method.
 Downloaded through Hugging Face's built-in cache, then installed into the
-destination dir.
+destination dir. A partial cache (an interrupted download) is completed
+rather than re-downloaded; a download that still leaves one of the files
+the install needs missing is a hard error naming it.
 
 The published checkpoint names its architecture "DSparkDraftModel", which
 vLLM 0.28.0's model registry maps to the DeepSeek V4 DSpark class -- the
@@ -31,6 +33,8 @@ import _ui as ui
 REPO = "RadixArk/Qwen3.8-27B-DSpark"
 _PUBLISHED_ARCH = "DSparkDraftModel"   # maps to the DeepSeek V4 class in 0.28.0
 _QWEN3_ARCH = "Qwen3DSparkModel"       # the class that serves this checkpoint
+# what the install consumes -- the snapshot must actually contain all of it
+NEED = ("config.json", "dspark.py", "dflash.py", "model.safetensors")
 _BAR_MIN = 8 << 20  # copies above this size run as a progress bar
 
 
@@ -93,10 +97,11 @@ def main():
     t_r = time.monotonic()
     p = ui.Progress(f"Fetching {REPO}")
     try:
-        hub = ui.snapshot(REPO, progress=p)
+        hub = ui.snapshot(REPO, progress=p, require=list(NEED))
     except Exception as e:
         p.finish(False, f"Fetching {REPO} failed ({e!r})",
-                 "check the network and Hugging Face reachability; once cached, re-runs are offline",
+                 "check the network and Hugging Face reachability (a proxy, or HF_HUB_OFFLINE=1, blocks it)",
+                 "an offline box can only use a warm cache",
                  fatal=True)
     p.finish(True, f"Fetched {REPO} in {ui.dur(time.monotonic() - t_r)}")
 

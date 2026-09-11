@@ -46,7 +46,7 @@ COPY recipes/ recipes/
 # caches. HF_HOME is pinned so the location cannot drift if HOME is
 # overridden at run time.
 RUN mkdir -p /cache /app/models && chmod 1777 /cache
-ENV HOME=/cache HF_HOME=/cache/.cache/huggingface VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HOME=/cache HF_HOME=/cache/.cache/huggingface VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 HF_XET_HIGH_PERFORMANCE=1
 VOLUME ["/cache", "/app/models"]
 EXPOSE 8080
 ENTRYPOINT ["bash", "docker/entrypoint.sh"]

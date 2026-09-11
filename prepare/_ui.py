@@ -21,6 +21,15 @@ import sys
 import threading
 import time
 
+# huggingface_hub 1.27 downloads Xet-stored files through the hf_xet
+# package (a hard dependency of 1.27 on our platforms); this env selects
+# its high-performance profile (wide concurrency, big buffers). Without
+# it, large unauthenticated downloads were observed to stall mid-file on
+# real boxes. Change it in the real environment -- a .env value is read
+# after this module imports and cannot override it (=0 disables the
+# profile; Xet itself is HF_HUB_DISABLE_XET).
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+
 IS_TTY = sys.stdout.isatty()
 COLOR = IS_TTY and not os.environ.get("NO_COLOR")
 
@@ -304,20 +313,39 @@ class Progress:
 
 # --- Hugging Face snapshot downloads -------------------------------------
 
-def snapshot(repo, progress=None, **kw):
+def snapshot(repo, progress=None, require=None, **kw):
     """snapshot_download with this module's bar instead of its tqdm.
 
     Tries the local cache first: a warm cache resolves silently and
     instantly. The network pass routes all of huggingface_hub 1.x's
-    internal bars into `progress` (a Progress)."""
+    internal bars into `progress` (a Progress) and also completes a
+    partial cache (the hub re-verifies what is there). With `require`
+    (the files the caller installs), a cache dir missing any of them is
+    treated as a miss, and a download that still leaves them missing is
+    a hard error naming the files -- an interrupted download must never
+    masquerade as a warm cache."""
     from huggingface_hub import snapshot_download
 
+    def _missing(path):
+        if not require:
+            return []
+        return [f for f in require
+                if not os.path.isfile(os.path.join(path, f))]
+
     try:
-        return snapshot_download(repo, local_files_only=True, **kw)
+        local = snapshot_download(repo, local_files_only=True, **kw)
+        if not _missing(local):
+            return local
     except Exception:
-        if progress is None:
-            return snapshot_download(repo, **kw)
-        return snapshot_download(repo, tqdm_class=_tqdm_bridge(progress), **kw)
+        pass
+    if progress is None:
+        hub = snapshot_download(repo, **kw)
+    else:
+        hub = snapshot_download(repo, tqdm_class=_tqdm_bridge(progress), **kw)
+    missing = _missing(hub)
+    if missing:
+        raise RuntimeError(f"{repo}: {', '.join(missing)} missing after download")
+    return hub
 
 
 def _tqdm_bridge(progress):

@@ -13,7 +13,7 @@ explicit flags — no CTX/SPEC-style configuration to construct.
 | [w4a16-bf16-dflash2.sh](recipes/w4a16-bf16-dflash2.sh) | unquantized bf16, FlashAttention | DFlash2, 7 | the quality baseline -- no quantized-KV approximation anywhere |
 | [w4a16-int4-dflash2.sh](recipes/w4a16-int4-dflash2.sh) | `int4_per_token_head` | DFlash2, 7 | context capacity: double the context of int8 in the same VRAM |
 | [w4a8-int8-dflash2.sh](recipes/w4a8-int8-dflash2.sh) | `int8_per_token_head` + W4A8 linears | DFlash2, 7 | faster prefill at the documented quality cost |
-| [w4a16-int8-dspark.sh](recipes/w4a16-int8-dspark.sh) | `int8_per_token_head` | DSpark community drafter (bf16), 7 | opt-in drafter: upstream measured it slower than the dflash2 head on their boxes; unmeasured on this shape |
+| [w4a16-int8-dspark.sh](recipes/w4a16-int8-dspark.sh) | `int8_per_token_head` | DSpark community drafter (bf16), 7 | upstream measured it slower than the dflash2 head on their boxes; unmeasured on this shape |
 
 The numbers in the notes below are upstream's, measured on their reference
 box; we have not benchmarked these recipes -- run them on your hardware
@@ -50,7 +50,7 @@ different download.
 |---|---|---|---|---|---|---|
 | w4a16 | int8 | dflash2 | recipe (default) | | | |
 | w4a16 | int8 | mtp | recipe (upstream's MTP lane was fp8/FlashInfer; MTP + int8 + split-KV never measured upstream) | | | |
-| w4a16 | int8 | dspark | recipe (opt-in; upstream measured dspark on bf16 KV only -- the int8 cell is ours to fill) | | | |
+| w4a16 | int8 | dspark | recipe (upstream measured dspark on bf16 KV only -- the int8 cell is ours to fill) | | | |
 | w4a16 | bf16 | dflash2 | recipe (the quality baseline) | | | |
 | w4a16 | int4 | dflash2 | recipe (upstream measured depth quality once, on a single 4090: 96.0% GSM8K, 100k needle retrieved; untested on TP=2) | | | |
 | w4a16 | bf16 | mtp | valid, no recipe (the split-KV kernel's native path is bf16) | | | |
@@ -78,7 +78,7 @@ requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
 setup.py            bare-metal one-shot: venv, deps, patches, model prep
 recipes/            the six serve configurations
 prepare/            build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py -- model prep + idempotent patching (runs standalone)
-patches/            the 29 vLLM patches (below)
+patches/            the 30 vLLM patches (below)
 docker/             entrypoint.sh, prepare.sh
 ```
 
@@ -101,11 +101,10 @@ The entrypoint prepares the models on first start (downloads through the
 mounted hub cache — seconds when it is warm; `qwen-cache` holds everything
 else), then execs the recipe: `syv-recipes w4a16-int8-mtp`,
 `w4a16-bf16-dflash2`, `w4a16-int4-dflash2`, `w4a8-int8-dflash2` or
-`w4a16-int8-dspark` (its ~3.7 GB DSpark checkpoint is fetched by the
-prepare step for that arm) for the others, `syv-recipes prepare` for prep only,
+`w4a16-int8-dspark` -- for the others, `syv-recipes prepare` for prep only,
 `PREPARE=0` to skip it. `qwen-models` receives the assembled dirs:
 hard-linked off the cache when both volumes share a filesystem, a second
-~21 GB copy when they don't. `VLLM_API_KEY=…` turns on key auth; without
+~25 GB copy when they don't. `VLLM_API_KEY=…` turns on key auth; without
 it the server binds 0.0.0.0 and is open. Any of these can be passed from a
 `.env` with `--env-file`.
 
@@ -119,7 +118,7 @@ fall back to a full copy.
 ## Bare metal (uv)
 
 ```bash
-./setup.py             # venv + pinned deps + the 29 patches + both models (DSPARK=1 also fetches the DSpark drafter)
+./setup.py             # venv + pinned deps + the 30 patches + all three models (DSPARK=/path redirects the DSpark dir; =0 skips it)
 bash recipes/w4a16-int8-dflash2.sh  # or any of the other five
 ```
 
@@ -151,10 +150,10 @@ wins. Values may be quoted; whole-line `#` comments only. The variables the
 scripts and recipes consume are `VENV`, `MODEL`, `DRAFT`, `DSPARK` and `PORT` (e.g.
 `VENV=/data/qwen/.venv`); note the `VLLM_*` env vars each recipe hard-exports
 are always set by the recipe itself, so a `.env` cannot change them.
-`DSPARK=1` fetches the DSpark drafter into the recipe's own default dir;
-a path form (`DSPARK=/dir`) puts it in `/dir` instead, in which case the
-recipe finds it only if `DRAFT` points at the same place (`=0` is an
-explicit no-op).
+Both preps fetch the DSpark drafter by default, into the recipe's own
+default dir; a path form (`DSPARK=/dir`) puts it in `/dir` instead, in
+which case the recipe finds it only if `DRAFT` points at the same place
+(`=0` is an explicit no-op).
 In the container use the native equivalent, `docker run --env-file .env`
 (`.env` is gitignored and out of the build context).
 
@@ -210,6 +209,7 @@ patches below extend the native implementation instead.
 - `triton-prefill-attn-int8.patch` — int8-QK Triton prefill attention for the head_dim-256 layers (`VLLM_PREFILL_ATTN=int8`; bf16 KV, single-request prefill chunks only, off by default; 1.27-1.35x on the kernel vs FA2)
 - `vision-tower-cpu-offload.patch` — vision tower in pinned host RAM (`VLLM_VISION_CPU_OFFLOAD_GB`)
 - `vllm-pr50021-gdn-spec-bounds.patch` — bounds on accepted-token state lookups in the GDN/Mamba spec kernels
+- `vllm-pr54282-draft-gumbel-salt.patch` — vLLM #54282: the Gumbel noise that re-samples a rejected draft token was correlated with the noise that produced it, biasing acceptance toward the drafter; salts the draft's stream (1<<30) so the two are independent (upstream backport; the dflash2 hunk ported by hand)
 - `xgrammar-spec-terminated.patch` — structured output survives tokens accepted past the grammar's end
 
 Removed from the upstream stack: KVarN (4/2-bit KV, including its
@@ -270,7 +270,7 @@ n-gram chains are in the set (both off by default) — adopted in this sync.
   tok/s), flat on prose. Both were measured upstream on a single card;
   lookup is untested on TP=2 — check acceptance and output before relying
   on it (drop either into `.env` to try).
-- **DSpark drafter (opt-in, w4a16-int8-dspark)**: vLLM 0.28.0 has a native
+- **DSpark drafter (w4a16-int8-dspark, fetched in every setup)**: vLLM 0.28.0 has a native
   `dspark` speculative method, and the community checkpoint
   (RadixArk/Qwen3.8-27B-DSpark, bf16, 1.86 B params / ~3.7 GB, 7 drafts per
   step) serves on our int8-KV stack once you dodge two traps -- both handled
@@ -290,9 +290,9 @@ n-gram chains are in the set (both off by default) — adopted in this sync.
   0.93 / native max len for shape consistency; if it fails to boot on 24 GB
   cards, that is why (the recipe header says what to change). The TP=2 +
   int8 KV cell is ours to measure -- compare acceptance and
-  perplexity/GSM8K against w4a16-int8-dflash2 before trusting it. `DSPARK=1
-  ./setup.py` (or the container's w4a16-int8-dspark arm) fetches the
-  checkpoint.
+  perplexity/GSM8K against w4a16-int8-dflash2 before trusting it.
+  `./setup.py` (or the container's w4a16-int8-dspark arm) fetches the
+  checkpoint by default (`DSPARK=/path` redirects, `=0` skips it).
 - **Multi-turn prefix caching**: `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS`
   (on by default in the recipes — the patch ships it off; set it to 0
   to opt out) keeps the mamba state snapshots a conversation's hits
