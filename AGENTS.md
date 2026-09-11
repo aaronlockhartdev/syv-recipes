@@ -144,7 +144,9 @@ does not merge main; sync is a manual diff:
 Caveats: on this Mac, the macOS vllm wheel is shorter than the Linux one
 and hunks in some patches don't match, so patch validation must happen in
 a Linux venv (the Docker build does it). Use `gpatch` on macOS; the
-system `patch` is netBSD-derived and incompatible.
+system `patch` is netBSD-derived and incompatible. The upstream OpenCode
+client docs (a README section pointing OpenCode at their launcher) are for
+their single-user flow, not adopted here (user decision 2026-09-11).
 
 ## Before calling a change done
 
