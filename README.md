@@ -102,7 +102,8 @@ mounted hub cache — seconds when it is warm; `qwen-cache` holds everything
 else), then execs the recipe: `syv-recipes w4a16-int8-mtp`,
 `w4a16-bf16-dflash2`, `w4a16-int4-dflash2`, `w4a8-int8-dflash2` or
 `w4a16-int8-dspark` -- for the others, `syv-recipes prepare` for prep only,
-`PREPARE=0` to skip it. `qwen-models` receives the assembled dirs:
+`PREPARE=0` to skip it (the prep honors `SWIFT=1` for the Swift variant --
+see the note). `qwen-models` receives the assembled dirs:
 hard-linked off the cache when both volumes share a filesystem, a second
 ~25 GB copy when they don't. `VLLM_API_KEY=…` turns on key auth; without
 it the server binds 0.0.0.0 and is open. Any of these can be passed from a
@@ -118,7 +119,7 @@ fall back to a full copy.
 ## Bare metal (uv)
 
 ```bash
-./setup.py             # venv + pinned deps + the 30 patches + all three models (DSPARK=/path redirects the DSpark dir; =0 skips it)
+./setup.py             # venv + pinned deps + the 30 patches + all three models (DSPARK=/path redirects the DSpark dir; =0 skips it; SWIFT=1 adds the ~20 GB Swift variant)
 bash recipes/w4a16-int8-dflash2.sh  # or any of the other five
 ```
 
@@ -147,7 +148,7 @@ The same overrides can live in a `.env` file at the repo root instead:
 every recipe and both `setup.py` and `patch_vllm.py` read it, but only for
 a variable that is unset or empty in the real environment, which always
 wins. Values may be quoted; whole-line `#` comments only. The variables the
-scripts and recipes consume are `VENV`, `MODEL`, `DRAFT`, `DSPARK` and `PORT` (e.g.
+scripts and recipes consume are `VENV`, `MODEL`, `DRAFT`, `DSPARK`, `SWIFT` and `PORT` (e.g.
 `VENV=/data/qwen/.venv`); note the `VLLM_*` env vars each recipe hard-exports
 are always set by the recipe itself, so a `.env` cannot change them.
 Both preps fetch the DSpark drafter by default, into the recipe's own
@@ -169,6 +170,8 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 # optional: the DSpark drafter (for recipes/w4a16-int8-dspark.sh)
 .venv/bin/python prepare/fetch_dspark.py          models/Qwen3.8-27B-DSpark
+# optional: the ukisai Swift variant, W4A16 (~20 GB; see the Notes bullet)
+.venv/bin/python prepare/build_swift_model.py     models/Qwen3.8-27B-Swift-W4A16
 ```
 
 The recipes put the venv's `bin` on PATH (`VENV`, defaulting to `.venv`) and
@@ -293,6 +296,26 @@ n-gram chains are in the set (both off by default) — adopted in this sync.
   perplexity/GSM8K against w4a16-int8-dflash2 before trusting it.
   `./setup.py` (or the container's w4a16-int8-dspark arm) fetches the
   checkpoint by default (`DSPARK=/path` redirects, `=0` skips it).
+- **The ukisai Swift variant (opt-in: `SWIFT=1` in either prep; `SWIFT=/dir`
+  redirects)**: ukisai/Swift-Qwen3.8-27b is a reasoning-efficiency fine-tune
+  of the base model -- their headline is ~58% fewer thinking tokens at <1%
+  accuracy cost on their benches (served bf16 on big boxes).
+  `jamesbrunet/Swift-Qwen3.8-27b-W4A16-AutoRound` (ungated, ~20 GB) is its
+  W4A16 AutoRound quant, and `prepare/build_swift_model.py` turns it into a
+  servable dir with the same operations the fast model gets -- round-to-
+  nearest int8 group-128 for `lm_head` (~1.3 GB freed), `embed_tokens`
+  (~1.3 GB) and the MTP module (~0.4 GB; the published config would
+  otherwise refuse any speculative load) -- plus the froggeric template; one
+  CPU pass, ~8 GB RAM. What it is *not* yet: the GPTQ-calibrated int4 heads
+  and the 40k MTP draft head need the upstream drafter/ training pipeline
+  run against this fine-tune (deferred) -- until then the MTP recipe runs
+  the native full-vocab head, and the dflash2/dspark drafters (trained on
+  the base model) are unmeasured on it: compare acceptance against the base
+  before trusting them. UkisAI's Swift Open License v1.0 (free up to $1M
+  revenue, enterprise above) is restrictive, so the dir is fetched and
+  built, never committed. Serve:
+  `MODEL=models/Qwen3.8-27B-Swift-W4A16 bash recipes/w4a16-int8-mtp.sh`
+  (any recipe loads the dir).
 - **Multi-turn prefix caching**: `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS`
   (on by default in the recipes — the patch ships it off; set it to 0
   to opt out) keeps the mamba state snapshots a conversation's hits

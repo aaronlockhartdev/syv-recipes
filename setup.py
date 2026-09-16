@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One-shot bare-metal setup: venv + pinned deps + the vllm patches +
-all three model dirs.
+the three default model dirs (an opt-in Swift variant with SWIFT=1).
 
 Idempotent -- re-run it any time (patch_vllm.py converges whatever state
 it finds; the prep scripts are idempotent by design). No positional
@@ -10,6 +10,9 @@ models/Qwen3.8-27B-W4A16-AutoRound-fast,
 models/Qwen3.8-27B-DFlash2-W4A16,
 models/Qwen3.8-27B-DSpark); every setup fetches all three by
 default -- DSPARK=/path redirects the DSpark dir, DSPARK=0 skips it.
+SWIFT=1 additionally builds the ukisai Swift W4A16 variant (models/
+Qwen3.8-27B-Swift-W4A16, ~20 GB); SWIFT=/path redirects it, and an
+unset or 0/false/no value skips it.
 
 Runs under any python3 (the venv does not exist yet); it shells out to
 uv and to the venv's own python for the rest.
@@ -160,6 +163,19 @@ def main():
         run(
             "Fetching the DSpark drafter",
             [PY, REPO / "prepare" / "fetch_dspark.py", dst],
+        )
+    # opt-in: SWIFT=1 builds the Swift W4A16 variant, SWIFT=/path redirects
+    swift = (os.environ.get("SWIFT") or "").strip()
+    if swift and swift not in ("0", "false", "no"):
+        dst = (
+            REPO / "models" / "Qwen3.8-27B-Swift-W4A16"
+            if swift in ("1", "true", "yes")
+            else Path(swift)
+        ).expanduser()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            "Building the Swift W4A16 variant",
+            [PY, REPO / "prepare" / "build_swift_model.py", dst],
         )
     ui.done(f"Ready -- serve with:  bash {REPO / 'recipes' / 'w4a16-int8-dflash2.sh'}   (or any of recipes/)")
 

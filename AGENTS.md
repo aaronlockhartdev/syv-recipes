@@ -81,6 +81,17 @@ combination is new to the matrix).
   dspark.py/dflash.py so the installed dir stays self-contained; an
   interrupted (partial) cache is completed, never treated as warm.
 
+- **The Swift variant is opt-in** (`SWIFT=1` in setup/prepare; `SWIFT=/path`
+  redirects): `prepare/build_swift_model.py` applies the fast model's
+  round-to-nearest operations (int8 group-128 lm_head/embed_tokens/MTP
+  module, froggeric template) to jamesbrunet's W4A16-AutoRound quant of
+  the ukisai reasoning-efficiency fine-tune (~58% fewer thinking tokens
+  at <1% accuracy on their benches). The GPTQ int4 upgrades and the 40k
+  MTP draft head are deferred (they need the upstream drafter/ pipeline
+  run against the fine-tune): until the re-fit lands, MTP runs the native
+  full-vocab head and the dflash2/dspark drafters (base-trained) are
+  unmeasured on it. The Swift Open License is restrictive (free up to
+  $1M ARR) -- the dir is fetched and built, never committed.
 - **Mamba align-snapshot retention is on by default**
   (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` in every recipe — the patch
   ships off; deviation). All recipes run `--mamba-cache-mode align`,
@@ -117,7 +128,7 @@ combination is new to the matrix).
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
 recipes/ the six *.sh
-prepare/ build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py, _ui.py
+prepare/ build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py, _ui.py
 patches/ the 30 synced patches
 ```
 
