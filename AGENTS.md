@@ -103,11 +103,14 @@ combination is new to the matrix).
   `os.environ.get(k) or default`, and the `.env` loader all treat an
   empty string as absent. `.env` (repo root, gitignored) only fills
   variables that are unset-or-empty in the real environment, which always
-  wins.
+  wins. `EXTRA_ARGS` is a plain `.env` variable like the rest.
 - **Recipe scripts are data, not logic**: the whole server configuration is
   inlined in the one `exec vllm serve` line; env vars are only what the
   patch stack needs (and their defaults). No config branching. No comment
-  lines inside backslash continuation chains.
+  lines inside backslash continuation chains. The one sanctioned escape
+  hatch is the trailing unquoted `${EXTRA_ARGS:-}` in each recipe's exec
+  line (user-supplied vLLM args, appended last so they can override the
+  recipe's own flags).
 - **All scripts are idempotent** and print in uv's style via the shared
   `prepare/_ui.py`: verb-led lines (first letter always capitalized),
   `+` / `·` / `×` markers, bold stage headers that group their sub-lines,

@@ -7,6 +7,13 @@
 # with four deviations:
 #   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
 #      -- same per-token width, ~2x the pool of bf16.
+#      Upstream measured this exact lane on a single 3090 (SPEC=mtp, 120k
+#      context, concurrency 1): equal to their stock fp8/FlashInfer at
+#      8K depth, -22% decode at 25K, -34% decode / -44% fresh prefill at
+#      60K (TTFT 68.9 -> 122.6 s), +2.5% end-to-end at chat length,
+#      quality-neutral (GSM8K 96.5 vs 96.0, PPL +0.02%). Those are
+#      upstream single-card measurements, not ours; re-measure before
+#      trusting them at your context depth.
 #   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
 #      only for bf16-KV and dflash2; patches/spec-decode-int8-kv.patch
 #      teaches it the int8 cache. Upstream never measured MTP with it, so
@@ -114,4 +121,5 @@ exec vllm serve "$MODEL" \
   --compilation-config '{"max_cudagraph_capture_size":32,"cudagraph_mode":"PIECEWISE","custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
-  --enable-auto-tool-choice --tool-call-parser qwen3_xml
+  --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+  ${EXTRA_ARGS:-}

@@ -148,9 +148,13 @@ The same overrides can live in a `.env` file at the repo root instead:
 every recipe and both `setup.py` and `patch_vllm.py` read it, but only for
 a variable that is unset or empty in the real environment, which always
 wins. Values may be quoted; whole-line `#` comments only. The variables the
-scripts and recipes consume are `VENV`, `MODEL`, `DRAFT`, `DSPARK`, `SWIFT` and `PORT` (e.g.
+scripts and recipes consume are `VENV`, `MODEL`, `DRAFT`, `DSPARK`, `SWIFT`, `PORT` and `EXTRA_ARGS` (e.g.
 `VENV=/data/qwen/.venv`); note the `VLLM_*` env vars each recipe hard-exports
 are always set by the recipe itself, so a `.env` cannot change them.
+`EXTRA_ARGS` is special: every recipe appends it (unquoted) at the end of its
+`vllm serve` line, so it can carry any vLLM flags on top of the recipe's own;
+for single-valued options its value wins over the recipe's
+(e.g. `EXTRA_ARGS="--disable-async-scheduling"`), and it is on your own responsibility.
 Both preps fetch the DSpark drafter by default, into the recipe's own
 default dir; a path form (`DSPARK=/dir`) puts it in `/dir` instead, in
 which case the recipe finds it only if `DRAFT` points at the same place
@@ -258,6 +262,21 @@ n-gram chains are in the set (both off by default) — adopted in this sync.
   the #73 fix below: 0.28.0 with `draft_sample_method` reads 3.23 tok/step
   / 121.7 tok/s against 0.27.1's 3.19 / 120.5 (reference 3090, CTX=fast =
   bf16 KV, k=15) — at or above the old base.
+- **Upstream sync 1834917..bae2023**: adopted the #86 int64 cast in
+  `spec-decode-attn.patch` (verbatim) and `triton-prefill-attn-int8.patch`
+  (adopted under its kept name: upstream renamed it to prefill-attn-int8, but
+  our alphabetical apply order must keep this patch after
+  spec-decode-attn; upstream's relies on their patches/series file for that). Not
+  adopted: `mamba-align-retire-null-gaps.patch` (needs a 3090 A/B against
+  our VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1 default -- both touch the
+  align-snapshot free path), `offload-mtp-serve.patch` (CPU KV tier under
+  MTP; our recipes run no connector -- upstream measured 96 -> 102 tok/s
+  at CTX=long with it), `offload-wsl2-devptr.patch` (WSL2 out of scope),
+  `triton-spec-attn-fp8-kv.patch` (sm89+; our 3090s are sm86),
+  `sse-keep-alive` / `engine-completion-log` / `engine-stall-sentinel`
+  (observability, non-MTP; candidates for a later sync),
+  `int4-mq3d-envs.patch` (our int4 lane reads os.environ directly -- see
+  its patch header).
 - **`draft_sample_method` is required on 0.28.0** (upstream #73): the
   native speculator base allocates the draft-logits buffer only when the
   speculative config asks for it; without it the rejection test loses its

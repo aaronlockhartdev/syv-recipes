@@ -140,4 +140,5 @@ exec vllm serve "$MODEL" \
   --compilation-config '{"max_cudagraph_capture_size":64,"custom_ops":["+rms_norm","+silu_and_mul"]}' \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
-  --enable-auto-tool-choice --tool-call-parser qwen3_xml
+  --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+  ${EXTRA_ARGS:-}

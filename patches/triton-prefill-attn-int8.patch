@@ -39,13 +39,18 @@ and carries that block's first lines as context, so the file name sorts after
 spec-decode-*.patch on purpose -- the Docker gate and verify.sh apply
 patches/*.patch alphabetically (this is why it was named triton-... and not
 prefill-...: CI was red for four commits with 'Hunk #1 FAILED at 1038').
+The #86 int64 cast was adopted from upstream bae2023, whose copy of this
+patch was renamed prefill-attn-int8.patch (safe for them because their
+apply order lives in a patches/series file); we keep the triton- name
+because our apply order is the alphabetical glob, which must place this
+patch after spec-decode-attn.patch.
   patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/triton-prefill-attn-int8.patch
 
 Written against vLLM 0.27.1.
 
 --- /dev/null
 +++ b/v1/attention/backends/prefill_attn_hd256.py
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,242 @@
 +"""Prefill attention for head_dim 256 on sm86: GQA-packed, paged-KV, causal,
 +with an int8-QK^T mode (SageAttention-style) that runs the score GEMM on int8
 +tensor cores at 2x the fp16 rate.
@@ -86,6 +91,7 @@ Written against vLLM 0.27.1.
 +        pos = start + tl.arange(0, CHUNK)
 +        ok = pos < kv_len
 +        blk = tl.load(bt_ptr + pos // BLOCK_SIZE, mask=ok, other=0)
++        blk = blk.to(tl.int64)  # the stride multiply below overflows int32 past block id 2,383 (#86)
 +        slot = pos % BLOCK_SIZE
 +        ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks \
 +            + kvh * stride_kh + d[None, :]
@@ -111,6 +117,7 @@ Written against vLLM 0.27.1.
 +    ok = pos < kv_len
 +    d = tl.arange(0, D)
 +    blk = tl.load(bt_ptr + pos // BLOCK_SIZE, mask=ok, other=0)
++    blk = blk.to(tl.int64)  # the stride multiply below overflows int32 past block id 2,383 (#86)
 +    slot = pos % BLOCK_SIZE
 +    ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks \
 +        + kvh * stride_kh + d[None, :]
@@ -178,6 +185,7 @@ Written against vLLM 0.27.1.
 +        pos = start + tl.arange(0, BLOCK_N)
 +        k_ok = pos < kv_len
 +        blk = tl.load(bt_ptr + pos // BLOCK_SIZE, mask=k_ok, other=0)
++        blk = blk.to(tl.int64)  # the stride multiply below overflows int32 past block id 2,383 (#86)
 +        slot = pos % BLOCK_SIZE
 +
 +        if INT8_QK:
