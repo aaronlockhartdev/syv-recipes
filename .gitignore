@@ -7,3 +7,6 @@ __pycache__/
 
 # agent runtime data (pi sessions, workflows)
 .pi/
+
+# agent working notes for sync investigations
+.sync-notes/

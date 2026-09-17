@@ -1,33 +1,52 @@
 #!/bin/bash
-# w4a16-int8-mtp: Qwen's own MTP head (3 drafts, probabilistic), TP=2, prefix
-# caching, int8 per-token-head KV, vision enabled.
+# w4a16-int4-mtp: Qwen's own MTP head (3 drafts, probabilistic) on the int4
+# per-token-head KV cache, TP=2, prefix caching, vision enabled.
 #
-# Flags are what the upstream launcher produced for
-#   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
-# with four deviations:
-#   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
-#      -- same per-token width, ~2x the pool of bf16.
-#      Upstream measured this exact lane on a single 3090 (SPEC=mtp, 120k
-#      context, concurrency 1): equal to their stock fp8/FlashInfer at
-#      8K depth, -22% decode at 25K, -34% decode / -44% fresh prefill at
-#      60K (TTFT 68.9 -> 122.6 s), +2.5% end-to-end at chat length,
-#      quality-neutral (GSM8K 96.5 vs 96.0, PPL +0.02%). Those are
-#      upstream single-card measurements, not ours; re-measure before
-#      trusting them at your context depth.
-#   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
-#      only for bf16-KV and dflash2; patches/spec-decode-int8-kv.patch
-#      teaches it the int8 cache. Upstream never measured MTP with it, so
-#      validate draft acceptance on your workload.
-#   3. cudagraph_mode=PIECEWISE. The default (FULL_AND_PIECEWISE) has a
-#      documented MTP corruption: with a prefix-cache hit, one prompt length
-#      in 128 (here: length % 128 == 4) returns "" / "#" or fluent wrong
-#      text. Upstream forced PIECEWISE for MTP for correctness; at the
-#      served lengths it costs nothing measured.
-#   4. --max-num-batched-tokens 8192 (upstream ships 2048; its batch lane
-#      measured 2048 beating 8192 -- bigger chunks inflate the profiled
-#      activation peak, which shrinks the KV/state page pool). We accept
-#      the smaller pool for half the prefill steps. (--max-num-seqs 8 and
-#      the 32 capture size are the launcher's own MTP values.)
+# This combination is ours: upstream's int4 lane is dflash2 (PR #42) and
+# their MTP lane is fp8/FlashInfer (single card) -- the int4 x MTP cell has
+# never been measured upstream, so treat every number as unmeasured until
+# you run it here. The int4 side inherits the int4-dflash2 story: halved
+# cache bytes (~2x the int8 context capacity) at ~20% decode vs the bf16
+# path, depth quality measured once upstream on a single 4090 (96.0% GSM8K,
+# 100k needle at 90% depth).
+#
+# Three items are not optional here (all from the w4a16-int4-dflash2 story;
+# upstream: docs/wsl2-4090.md):
+#   --prefix-match-unit 808: under int4's halved-page geometry the
+#     sliding-window prefix-cache guard returns a permanent clean miss
+#     unless the hash unit EQUALS the drafter's sliding-window block size
+#     (a finer divisor gets zero reuse from the guard's alignment clause),
+#     and the hybrid coordinator's min turns that one group's miss into
+#     zero reuse model-wide. The block size moves with the draft count:
+#     848 at n=7 (the dflash2 sibling), 808 at n=3 (MTP's 3 drafts; hash
+#     unit 1616). int8 never needs the flag (its geometry lands 864/864).
+#   VLLM_INT4_MQ_3D=1: the 3D multi-query verify dispatch for the int4
+#     cache (patches/spec-decode-int4-kv-mq3d.patch). MTP verifies 4
+#     queries per step; without it they take the 2D path, which upstream
+#     measured at ~8 tok/s at depth against ~25-29 with the 3D kernel.
+#   The int4 boot-blocker trio: patches/int4-kv-per-token-head.patch,
+#     patches/spec-decode-int4-kv-mq3d.patch and the spec-decode-scratch-*
+#     pair (3D scratch sizing + budgeting). The split-KV verify kernel
+#     (VLLM_SPEC_DECODE_ATTN) reads bf16/int8 caches only, so it is
+#     deliberately unset here.
+#
+# Inherited from the MTP family (the w4a16-int8-mtp story):
+#   cudagraph_mode=PIECEWISE. The default (FULL_AND_PIECEWISE) has a
+#   documented MTP corruption: with a prefix-cache hit, one prompt length
+#   in 128 returns "" / "#" or fluent wrong text. Upstream forced
+#   PIECEWISE for MTP for correctness; at the served lengths it costs
+#   nothing measured.
+#   draft_sample_method=probabilistic: required on 0.28.0 (upstream #73);
+#   without it the rejection test loses its denominator and acceptance
+#   drops ~16%.
+#
+# Deviations from the int8-mtp sibling, item for item: the KV dtype, the
+# --prefix-match-unit 808, VLLM_INT4_MQ_3D=1 for the 3D verify dispatch,
+# and no VLLM_SPEC_DECODE_ATTN. --max-num-batched-tokens 8192,
+# --max-num-seqs 8 and the 32 capture size are shared with the sibling
+# (the 8192 is the same pool-for-steps trade the int4-dflash2 recipe
+# documents); the 8192 peak trims this recipe's pool a little, so expect
+# somewhat less context capacity than the single-card int4 figures.
 #
 # The env vars support the patch stack; the vllm line is the complete
 # server configuration.
@@ -75,12 +94,12 @@ fi
 if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
   for f in /dev/shm/vllm_offload_*.mmap; do
     [ -e "$f" ] || continue
-    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[w4a16-int8-mtp] removing stale offload region $f"; rm -f "$f"; }
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[w4a16-int4-mtp] removing stale offload region $f"; rm -f "$f"; }
   done
 fi
 
-# split-KV verify attention reading the int8 cache (see header)
-export VLLM_SPEC_DECODE_ATTN=1
+# the 3D multi-query verify dispatch for the int4 cache (see header)
+export VLLM_INT4_MQ_3D=1
 # vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
 # off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
@@ -115,6 +134,7 @@ exec vllm serve "$MODEL" \
   --max-num-batched-tokens 8192 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
+  --prefix-match-unit 808 \
   --mamba-cache-mode align \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \

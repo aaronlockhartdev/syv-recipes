@@ -13,7 +13,7 @@ with the vllm version, a hash of patches/, and a hash of the tree the
 patches touch. A re-run whose stamp still matches all three is a fast
 no-op:
 
-    Audited vllm 0.28.0: 30 patches in place in 0.03s
+    Audited vllm 0.28.0: 35 patches in place in 0.03s
 
 When the hash no longer matches -- you pulled or edited patches, the
 venv's vllm changed, or the tree was edited after the audit -- the old
@@ -69,7 +69,7 @@ The states, then, tested in order on a hardlinked mirror of the tree
      re-run/reset hints say how to recover.
 
 The Dockerfile builds its image with the same sequence: apply in
-alphabetical order, then a compileall gate. GNU patch is required for
+patches/series order with --fuzz 0, then a compileall gate. GNU patch is required for
 the actual applying (Ubuntu ships it; on macOS use Homebrew's gpatch,
 which is preferred when present). A lock file in the venv keeps two
 runs from patching the same venv at once.
@@ -371,7 +371,7 @@ def classify(p, sp):
 def dryrun(p, sp):
     try:
         with open(p, "rb") as fh:
-            return subprocess.run([PATCH, "-p1", "-d", str(sp), "--batch", "--dry-run"],
+            return subprocess.run([PATCH, "-p1", "-d", str(sp), "--batch", "--fuzz", "0", "--dry-run"],
                                   stdin=fh, capture_output=True, text=True)
     except FileNotFoundError:
         ui.fail("The patch tool is not on PATH", "install it:  apt install patch")
@@ -380,7 +380,7 @@ def dryrun(p, sp):
 def apply_real(p, sp, reverse=False):
     """One real apply, captured: the script's own lines report progress,
     not patch's. The combined output is the failure evidence."""
-    cmd = [PATCH, "-p1", "-d", str(sp), "--batch"]
+    cmd = [PATCH, "-p1", "-d", str(sp), "--batch", "--fuzz", "0"]
     if reverse:
         cmd.append("-R")
     try:
@@ -394,12 +394,13 @@ def apply_plain(p, sp):
     stdin -- no --batch, no --dry-run -- the manual loop this set is
     written and validated against. Only called on a freshly reinstalled
     (pristine) tree, where no hunk is already in place, so patch never
-    needs to ask anything; its own result is authoritative here, and
-    its default fuzz and offset search take hunks the exact-match
-    content test cannot see (see the module docstring)."""
+    needs to ask anything; its own result is authoritative here. The
+    offset search stays (an offset means exact context in a grown file);
+    --fuzz 0 keeps a hunk cut against a tree that no longer exists from
+    landing by guess, the way upstream's series check enforces it."""
     try:
         with open(p, "rb") as fh:
-            return subprocess.run([PATCH, "-p1", "-d", str(sp)],
+            return subprocess.run([PATCH, "-p1", "-d", str(sp), "--fuzz", "0"],
                                   stdin=fh, capture_output=True, text=True)
     except FileNotFoundError:
         ui.fail("The patch tool is not on PATH", "install it:  apt install patch")
@@ -579,7 +580,27 @@ def main():
     version = version or "unknown"  # None: the dist exists but its metadata lacks a version
     ui.note(f"Found vllm {version} at {sp}")
 
-    patches = sorted((REPO / "patches").glob("*.patch"))
+    # Apply order is patches/series (the upstream file): later patches carry
+    # hunk context that earlier patches add, so the order is load-bearing.
+    # Without the file, fall back to glob order (the pre-series behavior).
+    series = REPO / "patches" / "series"
+    if series.is_file():
+        names = []
+        for line in series.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                names.append(line)
+        for name in names:
+            if not (REPO / "patches" / name).is_file():
+                ui.fail(f"patches/series lists {name}, which is not in patches/")
+        on_disk = {p.name for p in (REPO / "patches").glob("*.patch")}
+        missing = sorted(on_disk - set(names))
+        if missing:
+            ui.fail(f"patches/series and the directory disagree: "
+                    f"not in series: {', '.join(missing)}")
+        patches = [REPO / "patches" / n for n in names]
+    else:
+        patches = sorted((REPO / "patches").glob("*.patch"))
     if not patches:
         ui.fail(f"No .patch files in {REPO / 'patches'}", "the repo looks incomplete")
     fp = fingerprint(patches)

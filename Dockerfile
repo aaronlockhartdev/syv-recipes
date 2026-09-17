@@ -28,13 +28,18 @@ COPY requirements.txt .
 RUN uv venv .venv --python 3.14 \
     && uv pip install --python .venv/bin/python -r requirements.txt
 
-# set -e + --batch: a hunk that fails (or was already applied) aborts the
-# build instead of leaving a half-patched vLLM; compileall catches a patch
-# that applies but leaves broken Python.
+# set -e + --batch + --fuzz 0: a hunk that fails (or was already applied, or
+# only matches by approximate context) aborts the build instead of leaving a
+# half-patched vLLM; compileall catches a patch that applies but leaves broken
+# Python. Order is patches/series (the upstream file), not glob order -- a few
+# patches carry hunk context that an earlier patch adds.
 COPY patches/ patches/
 RUN set -e; \
     SP=$(.venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))'); \
-    for p in patches/*.patch; do echo "== $p"; patch -p1 -d "$SP" --batch < "$p"; done; \
+    while IFS= read -r name; do \
+      case "$name" in ''|\#*) continue ;; esac; \
+      echo "== $name"; patch -p1 -d "$SP" --batch --fuzz 0 --no-backup-if-mismatch < "patches/$name"; \
+    done < patches/series; \
     .venv/bin/python -m compileall -q "$SP"
 
 COPY docker/ docker/

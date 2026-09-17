@@ -177,6 +177,15 @@ def main():
             "Building the Swift W4A16 variant",
             [PY, REPO / "prepare" / "build_swift_model.py", dst],
         )
+    # some clients (JetBrains AI Assistant) send tool-call arguments as a JSON
+    # array instead of an object; harden the templates once for every prepared
+    # model (HARDEN_TEMPLATES=0 skips; a template that does not match the
+    # known pattern warns and is left alone)
+    if (os.environ.get("HARDEN_TEMPLATES") or "1") != "0":
+        run(
+            "Hardening the chat templates",
+            [PY, REPO / "prepare" / "harden_chat_template.py"],
+        )
     ui.done(f"Ready -- serve with:  bash {REPO / 'recipes' / 'w4a16-int8-dflash2.sh'}   (or any of recipes/)")
 
 

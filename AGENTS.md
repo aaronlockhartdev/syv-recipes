@@ -17,7 +17,7 @@ packaging. A change here that conflicts with an upstream technical fact
 needs upstream evidence for it, or an explicit "deviation from upstream"
 disclosure in the recipe header (all deviations are disclosed there).
 
-## The eight recipes
+## The nine recipes
 
 | recipe | stack | one-liner |
 |---|---|---|
@@ -25,6 +25,7 @@ disclosure in the recipe header (all deviations are disclosed there).
 | `w4a16-int8-mtp` | TRITON_ATTN, int8 KV, MTP head, PIECEWISE graphs | no separate drafter |
 | `w4a16-bf16-dflash2` | FLASH_ATTN, bf16 KV, dflash2 | the unquantized quality baseline |
 | `w4a16-int4-dflash2` | TRITON_ATTN, int4 KV, dflash2, `--prefix-match-unit 848` | ~2x the context capacity |
+| `w4a16-int4-mtp` | TRITON_ATTN, int4 KV, MTP head, 3 drafts, PIECEWISE graphs, `--prefix-match-unit 808`, `VLLM_INT4_MQ_3D=1` | the int4 context capacity with no separate drafter; the int4 x MTP cell, unmeasured upstream |
 | `w4a16-k4v2-dflash2` | KVarN backend (kvarn_k4v2_g128), dflash2, `--block-size 128`, `--prefix-match-unit 128` | the full 262k context, ~2x the int4 pool |
 | `w4a16-k4v2-mtp` | KVarN backend (kvarn_k4v2_g128), MTP head, 3 drafts, `--block-size 128`, `--prefix-match-unit 128` | the full 262k context with no separate drafter; 8 seats for 4-8 concurrent |
 | `w4a8-int8-dflash2` | dflash2 + W4A8 Marlin linears (INT8_LAYERS) | faster prefill, documented quality cost |
@@ -37,8 +38,10 @@ combination is new to the matrix).
 
 ## Invariants
 
-- **`patches/` is the synced set (34).** They apply in alphabetical = build
-  order because later patches depend on files created by earlier ones.
+- **`patches/` is the synced set (35).** They apply in the order of
+  `patches/series` (the upstream file; later patches depend on files and
+  hunk context created by earlier ones -- e.g. prefill-attn-int8 carries
+  spec-decode-attn's lines as context), not in glob order.
   They are the upstream files verbatim (`upstream/synced` names the
   upstream commit they come from); their headers carry the provenance
   (PR/issue refs and, where upstream stamps one, an "upstream <sha>"
@@ -47,8 +50,13 @@ combination is new to the matrix).
   3-field stamp (version + patch-set fingerprint + tree digest).
 - **MTP must keep `cudagraph_mode: PIECEWISE`** — the default (FULL)
   corrupts one prompt length in 128 (residue `k+1`) under prefix-cache hits.
-- **int4 KV must keep `--prefix-match-unit 848`** (drafter sliding-window
-  block vs hash unit) or the prefix cache can never match.
+- **int4 KV must keep a `--prefix-match-unit` equal to the drafter's
+  sliding-window block size** (upstream docs/wsl2-4090.md: the guard
+  returns a permanent clean miss unless the hash unit equals that block
+  size, and the hybrid coordinator's min turns one group's miss into zero
+  reuse model-wide). The block size moves with the draft count: 848 at
+  n=7 (w4a16-int4-dflash2, hash unit 1696), 808 at n=3 (w4a16-int4-mtp,
+  hash unit 1616). int8 never needs the flag (its geometry lands 864/864).
 - **k4v2 (KVarN) must keep `--block-size 128` and `--prefix-match-unit 128`** — the variance-normalization tile is the block, and the prefix hash unit must equal it, so cache hits land on tile boundaries; a non-multiple of 128 corrupts the pool (upstream single-user launcher). The k4v2 analogue of the int4 848 rule.
 - **fp8 KV is excluded** — deterministic Xid-31 on 3090-class (upstream
   issue #34). That is also why our MTP recipe is int8 KV rather than
@@ -71,8 +79,8 @@ combination is new to the matrix).
   #73): on 0.28.0 the native speculator base allocates the draft-logits
   buffer only when the config asks; without it the rejection test loses
   its denominator and acceptance drops ~16% (101.4 vs 121.7 tok/s
-  upstream). All eight drafter recipes (the five dflash2, the dspark, and
-  both MTP) set it to probabilistic.
+  upstream). All nine drafter recipes (the five dflash2, the dspark, and
+  the three MTP) set it to probabilistic.
 - **Vision is on** (no `--language-model-only`) — two 24 GB cards are not
   VRAM-limited; the tower offloads to pinned host RAM by default
   (`VLLM_VISION_CPU_OFFLOAD_GB=1`) since dflash2 + vision OOMs at graph
@@ -135,9 +143,9 @@ combination is new to the matrix).
 ```
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
-recipes/ the eight *.sh
-prepare/ build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py, _ui.py
-patches/ the 34 synced patches
+recipes/ the nine *.sh
+prepare/ build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, harden_chat_template.py, patch_vllm.py, _ui.py
+patches/ the 35 synced patches + patches/series (the apply order)
 ```
 
 Defaults: venv `.venv/`, models under `models/`, port 8080, and `Qwen3.8-

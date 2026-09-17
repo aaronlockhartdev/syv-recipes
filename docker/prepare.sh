@@ -31,6 +31,14 @@ esac
 if [ -n "$SWIFT_DIR" ]; then
   python prepare/build_swift_model.py "$SWIFT_DIR"
 fi
+# Some clients (JetBrains AI Assistant) send tool-call arguments as a JSON
+# array instead of an object; harden the templates so `|items` does not blow
+# up ("Can only get item pairs from a mapping.") once for every prepared
+# model. A template that does not match the known pattern warns and is left
+# alone; only an unreadable one fails prepare. HARDEN_TEMPLATES=0 skips it.
+if [ "${HARDEN_TEMPLATES:-1}" != "0" ]; then
+  python prepare/harden_chat_template.py
+fi
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   printf '  \033[32m✓\033[0m models ready under /app/models\n'
 else

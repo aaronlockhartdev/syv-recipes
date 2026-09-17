@@ -12,6 +12,7 @@ explicit flags — no CTX/SPEC-style configuration to construct.
 | [w4a16-int8-mtp.sh](recipes/w4a16-int8-mtp.sh) | `int8_per_token_head`, native max len | Qwen's own MTP head, 3 drafts, probabilistic | no separate drafter model; the head ships inside the checkpoint |
 | [w4a16-bf16-dflash2.sh](recipes/w4a16-bf16-dflash2.sh) | unquantized bf16, FlashAttention | DFlash2, 7 | the quality baseline -- no quantized-KV approximation anywhere |
 | [w4a16-int4-dflash2.sh](recipes/w4a16-int4-dflash2.sh) | `int4_per_token_head` | DFlash2, 7 | context capacity: double the context of int8 in the same VRAM |
+| [w4a16-int4-mtp.sh](recipes/w4a16-int4-mtp.sh) | `int4_per_token_head` | Qwen's own MTP head, 3 drafts, probabilistic | the int4 context capacity with no separate drafter model; the int4 x MTP cell is unmeasured upstream |
 | [w4a16-k4v2-dflash2.sh](recipes/w4a16-k4v2-dflash2.sh) | `kvarn_k4v2_g128` (KVarN 4/2-bit tiles) | DFlash2, 7 | the full 262k context: ~2x the int4 pool, at a context-length-dependent decode tax |
 | [w4a16-k4v2-mtp.sh](recipes/w4a16-k4v2-mtp.sh) | `kvarn_k4v2_g128` (KVarN 4/2-bit tiles) | Qwen's own MTP head, 3 drafts, probabilistic | the full 262k context with no separate drafter model; 8 seats for 4-8 concurrent |
 | [w4a8-int8-dflash2.sh](recipes/w4a8-int8-dflash2.sh) | `int8_per_token_head` + W4A8 linears | DFlash2, 7 | faster prefill at the documented quality cost |
@@ -59,7 +60,7 @@ different download.
 | w4a16 | k4v2 (KVarN) | dflash2 | recipe (upstream measured the MTP lane on one 3090: 262k fits, 2.13x decode at 112k; the dflash2 cell is ours to fill) | | | |
 | w4a16 | k4v2 (KVarN) | mtp | recipe (upstream's CTX=huge SPEC=mtp lane, single 3090: 2.13x decode at 112k, +0.16% PPL; the TP=2, 8-seat cell is ours to fill) | | | |
 | w4a16 | bf16 | mtp | valid, no recipe (the split-KV kernel's native path is bf16) | | | |
-| w4a16 | int4 | mtp | untested (does the 3D dispatch cover MTP verify, or is the 2D walk?) | | | |
+| w4a16 | int4 | mtp | recipe (ours: upstream has no int4 x MTP lane; needs `--prefix-match-unit 808` and `VLLM_INT4_MQ_3D=1`, both in the recipe) | | | |
 | w4a8 | int8 | dflash2 | recipe | | | |
 | w4a8 | bf16 | dflash2 | valid, no recipe (upstream's single-user INT8 default lane) | | | |
 | w4a8 | int4 | dflash2 | untested | | | |
@@ -81,9 +82,9 @@ on prefix-cache hits).
 Dockerfile          uv + pinned vLLM 0.28.0 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
 setup.py            bare-metal one-shot: venv, deps, patches, model prep
-recipes/            the eight serve configurations
-prepare/            build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py -- model prep + idempotent patching (runs standalone)
-patches/            the 34 vLLM patches (below)
+recipes/            the nine serve configurations
+prepare/            build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, harden_chat_template.py, patch_vllm.py -- model prep + idempotent patching (runs standalone)
+patches/            the 35 vLLM patches (below)
 docker/             entrypoint.sh, prepare.sh
 ```
 
@@ -105,7 +106,7 @@ docker run -d --name qwen --gpus all --ipc=host -p 8080:8080 \
 The entrypoint prepares the models on first start (downloads through the
 mounted hub cache — seconds when it is warm; `qwen-cache` holds everything
 else), then execs the recipe: `syv-recipes w4a16-int8-mtp`,
-`w4a16-bf16-dflash2`, `w4a16-int4-dflash2`, `w4a8-int8-dflash2` or
+`w4a16-bf16-dflash2`, `w4a16-int4-dflash2`, `w4a16-int4-mtp`, `w4a8-int8-dflash2` or
 `w4a16-int8-dspark` -- for the others, `syv-recipes prepare` for prep only,
 `PREPARE=0` to skip it (the prep honors `SWIFT=1` for the Swift variant --
 see the note). `qwen-models` receives the assembled dirs:
@@ -193,6 +194,13 @@ DFlash2 itself is native in vLLM 0.28.0 (upstream PR #52816) — the 0.27.1
 `dflash2-backport` is retired and no longer applied. The `dflash2-*`
 patches below extend the native implementation instead.
 
+This set is upstream's 2026-09 regeneration (PR #119): every patch is the
+verbatim file upstream exported from its pinned fork commits, with the
+syv env knobs registered in `vllm/envs.py` (so they enter the
+torch.compile cache key), and the apply order is `patches/series` — not
+glob order, because a few patches carry hunk context an earlier patch adds
+(upstream's CI applies the series fuzz-0 against the pinned vLLM).
+
 - `dflash2-lookup-drafting.patch` — lookup-augmented drafting (`VLLM_DFLASH2_LOOKUP=1`, off by default): propose continuations of earlier occurrences of the current suffix; on 0.28.0 it also carries the W4A16 draft-checkpoint support (packed-qkv dequant, quantized lm_head sharing) that native DFlash2 needs for this model
 - `dflash2-ngram-chains.patch` — drafter-free n-gram chains on top of lookup (`VLLM_DFLASH2_CHAIN=1`, off by default, greedy by default): while a request keeps reproducing its own context, whole verify blocks come from history and the drafter's forward and graph replay are skipped (upstream #38, ported from Dmtrii-tesla's fork)
 - `dflash2-prewarm.patch` — pre-compiles the `_prepare_dflash_inputs_kernel` Triton variants at boot, so the first large prefill never JIT-compiles mid-request (#48)
@@ -201,6 +209,7 @@ patches below extend the native implementation instead.
 - `hybrid-kv-groups-v2-cudagraph.patch` — KV-group sizing for the drafter's sliding-window layers; explicit CUDA-graph memory accounting (`VLLM_V2_CUDAGRAPH_MEM_MIB`)
 - `hybrid-sw-block-promote.patch` — lets a quantized KV cache fit in a hybrid target+drafter (block-size promotion instead of page padding)
 - `int4-kv-per-token-head.patch` — boot blockers for int4 per-token-head KV with the drafter
+- `int4-mq3d-envs.patch` — registers `VLLM_INT4_MQ_3D` / `VLLM_INT4_MQ_3D_DEBUG` in `vllm/envs.py` (the 3D dispatch the w4a16-int4-dflash2 and w4a16-int4-mtp recipes enable; new in this sync's regeneration)
 - `kvarn-0.28.0.patch` — the KVarN (Huawei CSL) dense KV-cache backend wiring for 0.28.0: the `kvarn_*` cache-dtype literals, `KVQuantMode.KVARN`, the backend registry + CUDA priority list, the packed-tile KV-cache spec, and the fp16 tail-pool `max_num_seqs` cap (upstream kvarn/)
 - `kvarn-files-0.28.0.patch` — the KVarN backend modules themselves (quantization config, Triton kernels, `KVarNAttentionBackend`), upstream's port of KVarN's vLLM 0.23 fork onto 0.28.0, create-only (the w4a16-k4v2-dflash2 recipe)
 - `kvarn-v2-runner-0.28.0.patch` — the V2-runner, sliding-cache and DFlash2 correctness fixes the KVarN lane needs; applied after the base port, cut against a tree carrying `mamba-align-retire-null-gaps` (upstream kvarn/)
@@ -208,32 +217,38 @@ patches below extend the native implementation instead.
 - `marlin-int8-negative-scales.patch` — correctness fix for negative group scales in W4A8
 - `marlin-repack-staged-sm80.patch` — staged Marlin repack (load-time allocation hygiene; the header records #27's corrected history — the old "VMM churn" theory was disproven)
 - `marlin-tune-table.patch` — routes `marlin_gemm` through a locally built tunable Marlin extension (`VLLM_MARLIN_TUNE=1`, a no-op without that build): +3-7% on the M≤16 decode/verify GEMMs, +2-20% on W4A8 chunked-prefill GEMMs
-- `mamba-align-checkpoint-order.patch` — retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238). Ships default off; all eight recipes default it on (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`)
+- `mamba-align-checkpoint-order.patch` — retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238). Ships default off; all nine recipes default it on (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`)
 - `mamba-align-retire-null-gaps.patch` — retires mamba align-mode state blocks across null gaps instead of holding them until the request ends (upstream backport of vllm#55450): a 480k-token prefill leaves 71 retained state blocks per Mamba group where 8-9 is the bound — peak pool pressure exactly where the k4v2 lane runs. The 0.28.0 sync left it pending a 3090 A/B against our `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` default (both touch the align-snapshot free path); it is adopted with the KVarN lane, which the v2-runner patch was cut against, and upstream #101 measured it inert on the dflash2 profile
 - `mamba-chunked-prefill-align.patch` — correctness fix: GDN/Mamba state loss and NaN during chunked prefill (the state-copy source column, and an uninitialized-memory mask in the flash-linear-attention chunk-o kernel)
 - `offload-dflash-eagle-groups.patch` — OffloadingConnector group flagging under dflash
+- `prefill-attn-int8.patch` — int8-QK Triton prefill attention for the head_dim-256 layers (`VLLM_PREFILL_ATTN=int8`; bf16 KV, single-request prefill chunks only, off by default; 1.27-1.35x on the kernel vs FA2). Upstream's name: this file was `triton-prefill-attn-int8` in our 0.28.0 sync and carries the upstream name since the regeneration
 - `qwen3_5-embed-quant.patch` — route the embedding table through the quantized path (the fast model needs it)
 - `qwen3_5-mtp-draft-vocab.patch` — vocab-truncated MTP draft head (the fast model's 40k draft head)
 - `sampler-small-topk-fast-softmax.patch` — sort-free top-k/top-p, multi-block softmax, truncated drafts
 - `spec-decode-attn.patch` — split-KV verify attention (`VLLM_SPEC_DECODE_ATTN`), bf16 path
-- `spec-decode-int4-kv-mq3d.patch` — multi-query 3D dispatch for the int4-KV verify (`VLLM_INT4_MQ_3D`; the w4a16-int4-dflash2 recipe)
+- `spec-decode-int4-kv-mq3d.patch` — multi-query 3D dispatch for the int4-KV verify (`VLLM_INT4_MQ_3D`; both int4 recipes)
 - `spec-decode-int8-kv.patch` — teaches the split-KV kernel to read the int8 per-token-head cache
 - `spec-decode-scratch-token-units.patch` — sizes the int4-3D softmax scratch buffers in query tokens, not sequences (the #46 gate campaign: 9-16-token verify batches had been falling back to 2D silently)
 - `spec-decode-scratch-within-budget.patch` — allocates those buffers inside the memory profile, so the reported KV budget is honest (#57 merge review)
 - `spec-sampler-prewarm.patch` — compiles the rejection sampler's Triton kernels at boot with a spec-shaped dummy verify, so the first draft-verifying request never JITs mid-request (#48)
 - `speed-knobs-envs.patch` — registers the speed knobs as env vars (torch.compile cache key)
-- `triton-prefill-attn-int8.patch` — int8-QK Triton prefill attention for the head_dim-256 layers (`VLLM_PREFILL_ATTN=int8`; bf16 KV, single-request prefill chunks only, off by default; 1.27-1.35x on the kernel vs FA2)
 - `vision-tower-cpu-offload.patch` — vision tower in pinned host RAM (`VLLM_VISION_CPU_OFFLOAD_GB`)
 - `vllm-pr50021-gdn-spec-bounds.patch` — bounds on accepted-token state lookups in the GDN/Mamba spec kernels
 - `vllm-pr54282-draft-gumbel-salt.patch` — vLLM #54282: the Gumbel noise that re-samples a rejected draft token was correlated with the noise that produced it, biasing acceptance toward the drafter; salts the draft's stream (1<<30) so the two are independent (upstream backport; the dflash2 hunk ported by hand)
 - `xgrammar-spec-terminated.patch` — structured output survives tokens accepted past the grammar's end
 
-Removed from the upstream stack: the whole WSL2 lane (out of scope).
-KVarN was dropped with it at the fork and is back in the set with the
-w4a16-k4v2-dflash2 recipe (adopted on request; its V2-runner port and the
-retire-null-gaps fix its patch set was cut against are in too).
+Removed from the upstream stack: the whole WSL2 lane (out of scope, incl.
+`offload-wsl2-devptr.patch`), `offload-mtp-serve.patch` (CPU KV tier under
+MTP; our recipes run no connector — upstream measured 96 -> 102 tok/s at
+CTX=long with it), `engine-completion-log.patch`, `engine-stall-sentinel.patch`,
+`sse-keep-alive.patch` (their harness/observability) and
+`triton-spec-attn-fp8-kv.patch` (sm89+; our 3090s are sm86, and fp8 KV is
+excluded here). KVarN was dropped with the WSL2 lane at the fork and is back
+in the set with the k4v2 recipes (adopted on request; its V2-runner port and
+the retire-null-gaps fix its patch set was cut against are in too).
 Lookup-augmented drafting and n-gram chains are in the set (both off by
-default) — adopted in this sync.
+default). `int4-mq3d-envs.patch` (skipped in the 0.28.0 sync, when the int4
+lane read os.environ directly) is in the set again with the regeneration.
 
 ## Notes
 
@@ -258,6 +273,19 @@ default) — adopted in this sync.
   `--prefix-match-unit 848` flag the recipe passes (without it the
   drafter's 848-token sliding-window block can never match the 1696-token
   hash unit).
+- **w4a16-int4-mtp**: the int4 capacity play without a separate drafter. The
+  combination is ours -- upstream's int4 lane is dflash2 (PR #42) and their MTP
+  lane is fp8/FlashInfer, so nothing about this cell is measured upstream;
+  compare outputs against w4a16-bf16-dflash2 before trusting it. Two flags are
+  load-bearing (upstream docs/wsl2-4090.md): `--prefix-match-unit 808` -- the
+  unit must equal the drafter's sliding-window block size exactly, and that
+  size moves with the draft count (848 at n=7, 808 at n=3, hash unit 1616),
+  so it is not the dflash2 sibling's 848 -- and `VLLM_INT4_MQ_3D=1`, the 3D
+  multi-query verify dispatch: MTP verifies 4 queries per step, and without
+  it they take the 2D path, ~8 tok/s at depth against ~25-29 with the 3D
+  kernel. The split-KV verify kernel reads bf16/int8 caches only, so it stays
+  off here; PIECEWISE capture and `draft_sample_method` come from the MTP
+  family as in w4a16-int8-mtp.
 - **w4a16-k4v2-dflash2**: the long-context play. KVarN's 4-bit-key /
   2-bit-value tiles (~840 B/token/layer) halve the int4 cache, so the same
   VRAM holds the model's full 262,144-token context. Upstream measurements
@@ -302,10 +330,10 @@ default) — adopted in this sync.
   / 121.7 tok/s against 0.27.1's 3.19 / 120.5 (reference 3090, CTX=fast =
   bf16 KV, k=15) — at or above the old base.
 - **Upstream sync 1834917..bae2023**: adopted the #86 int64 cast in
-  `spec-decode-attn.patch` (verbatim) and `triton-prefill-attn-int8.patch`
-  (adopted under its kept name: upstream renamed it to prefill-attn-int8, but
-  our alphabetical apply order must keep this patch after
-  spec-decode-attn; upstream's relies on their patches/series file for that). Not
+  `spec-decode-attn.patch` (verbatim) and the prefill patch (then kept as
+  `triton-prefill-attn-int8.patch`; this sync takes upstream's name,
+  `prefill-attn-int8.patch`, with the `patches/series` order replacing the
+  alphabetical one that had kept it after spec-decode-attn). Not
   adopted: `offload-mtp-serve.patch` (CPU KV tier under
   MTP; our recipes run no connector -- upstream measured 96 -> 102 tok/s
   at CTX=long with it), `offload-wsl2-devptr.patch` (WSL2 out of scope),
@@ -314,6 +342,26 @@ default) — adopted in this sync.
   (observability, non-MTP; candidates for a later sync),
   `int4-mq3d-envs.patch` (our int4 lane reads os.environ directly -- see
   its patch header).
+- **Upstream sync bae2023..d1df6dc** (this sync): adopted the 2026-09 series
+  regeneration (PR #119) -- all 32 kept patches are the verbatim upstream
+  exports from its pinned fork commits, the syv knobs are registered in
+  `vllm/envs.py` (the torch.compile cache key), the apply order is
+  `patches/series` (not glob order), and the Dockerfile and patch_vllm.py
+  both enforce `--fuzz 0`. Two holds from the previous sync resolve: the
+  prefill patch takes upstream's name (`prefill-attn-int8.patch`), and
+  `int4-mq3d-envs.patch` is in (its envs registration replaces the raw
+  os.environ reads the int4 lane used). One new behavioral hunk came with
+  the regeneration: `mamba-chunked-prefill-align` resets
+  `num_accepted_tokens` when a request's mamba state block changes mid-spec
+  step. Also adopted `prepare/harden_chat_template.py` (PR #116) -- some
+  agentic clients (JetBrains AI Assistant) send tool-call `arguments` as a
+  JSON array, which the Qwen3 template's `|items` 400s on; it runs in
+  docker/prepare.sh and setup.py after the builds (HARDEN_TEMPLATES=0
+  opts out; an unrecognised template only warns). Upstream renamed its
+  repo to syv-ai/HyperQwen and moved its README deep dives into docs/
+  (gotchas content unchanged); the `upstream` remote still names the old
+  repo, which GitHub redirects. Their verify.sh / quant_heads_stream fixes
+  target their own harness/scripts, not adopted.
 - **`draft_sample_method` is required on 0.28.0** (upstream #73): the
   native speculator base allocates the draft-logits buffer only when the
   speculative config asks for it; without it the rejection test loses its
