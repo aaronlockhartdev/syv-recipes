@@ -17,7 +17,7 @@ packaging. A change here that conflicts with an upstream technical fact
 needs upstream evidence for it, or an explicit "deviation from upstream"
 disclosure in the recipe header (all deviations are disclosed there).
 
-## The seven recipes
+## The eight recipes
 
 | recipe | stack | one-liner |
 |---|---|---|
@@ -26,6 +26,7 @@ disclosure in the recipe header (all deviations are disclosed there).
 | `w4a16-bf16-dflash2` | FLASH_ATTN, bf16 KV, dflash2 | the unquantized quality baseline |
 | `w4a16-int4-dflash2` | TRITON_ATTN, int4 KV, dflash2, `--prefix-match-unit 848` | ~2x the context capacity |
 | `w4a16-k4v2-dflash2` | KVarN backend (kvarn_k4v2_g128), dflash2, `--block-size 128`, `--prefix-match-unit 128` | the full 262k context, ~2x the int4 pool |
+| `w4a16-k4v2-mtp` | KVarN backend (kvarn_k4v2_g128), MTP head, 3 drafts, `--block-size 128`, `--prefix-match-unit 128` | the full 262k context with no separate drafter; 8 seats for 4-8 concurrent |
 | `w4a8-int8-dflash2` | dflash2 + W4A8 Marlin linears (INT8_LAYERS) | faster prefill, documented quality cost |
 | `w4a16-int8-dspark` | TRITON_ATTN, int8 KV, DSpark bf16 community drafter (RadixArk) | upstream-measured slower than the dflash2 head on their shape; unmeasured on ours |
 
@@ -70,8 +71,8 @@ combination is new to the matrix).
   #73): on 0.28.0 the native speculator base allocates the draft-logits
   buffer only when the config asks; without it the rejection test loses
   its denominator and acceptance drops ~16% (101.4 vs 121.7 tok/s
-  upstream). All six drafter recipes (the five dflash2 and the dspark) set
-  it to probabilistic; the MTP recipe has always set it.
+  upstream). All eight drafter recipes (the five dflash2, the dspark, and
+  both MTP) set it to probabilistic.
 - **Vision is on** (no `--language-model-only`) — two 24 GB cards are not
   VRAM-limited; the tower offloads to pinned host RAM by default
   (`VLLM_VISION_CPU_OFFLOAD_GB=1`) since dflash2 + vision OOMs at graph
@@ -134,7 +135,7 @@ combination is new to the matrix).
 ```
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
-recipes/ the seven *.sh
+recipes/ the eight *.sh
 prepare/ build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py, _ui.py
 patches/ the 34 synced patches
 ```

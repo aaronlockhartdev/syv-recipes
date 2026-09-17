@@ -13,6 +13,7 @@ explicit flags — no CTX/SPEC-style configuration to construct.
 | [w4a16-bf16-dflash2.sh](recipes/w4a16-bf16-dflash2.sh) | unquantized bf16, FlashAttention | DFlash2, 7 | the quality baseline -- no quantized-KV approximation anywhere |
 | [w4a16-int4-dflash2.sh](recipes/w4a16-int4-dflash2.sh) | `int4_per_token_head` | DFlash2, 7 | context capacity: double the context of int8 in the same VRAM |
 | [w4a16-k4v2-dflash2.sh](recipes/w4a16-k4v2-dflash2.sh) | `kvarn_k4v2_g128` (KVarN 4/2-bit tiles) | DFlash2, 7 | the full 262k context: ~2x the int4 pool, at a context-length-dependent decode tax |
+| [w4a16-k4v2-mtp.sh](recipes/w4a16-k4v2-mtp.sh) | `kvarn_k4v2_g128` (KVarN 4/2-bit tiles) | Qwen's own MTP head, 3 drafts, probabilistic | the full 262k context with no separate drafter model; 8 seats for 4-8 concurrent |
 | [w4a8-int8-dflash2.sh](recipes/w4a8-int8-dflash2.sh) | `int8_per_token_head` + W4A8 linears | DFlash2, 7 | faster prefill at the documented quality cost |
 | [w4a16-int8-dspark.sh](recipes/w4a16-int8-dspark.sh) | `int8_per_token_head` | DSpark community drafter (bf16), 7 | upstream measured it slower than the dflash2 head on their boxes; unmeasured on this shape |
 
@@ -32,7 +33,7 @@ use `--enable-prefix-caching` with `--prefix-caching-hash-algo xxhash`
 `--gpu-memory-utilization 0.93` (under TP>1 the pool is sized from
 utilization), `--mamba-ssm-cache-dtype float16` (halves the GDN state
 cost), `--max-num-seqs 8` (w4a16-k4v2-dflash2: 2) and
-`--max-num-batched-tokens 8192` (w4a16-k4v2-dflash2: 2048), the qwen3 reasoning parser,
+`--max-num-batched-tokens 8192` (w4a16-k4v2-dflash2, w4a16-k4v2-mtp: 2048), the qwen3 reasoning parser,
 qwen3_xml tool parsing, and `--enable-prompt-tokens-details`, so every
 response's `usage.prompt_tokens_details.cached_tokens` shows how much of
 the prompt the prefix cache served. Port 8080 (`PORT=…`) and a `.venv` at
@@ -56,6 +57,7 @@ different download.
 | w4a16 | bf16 | dflash2 | recipe (the quality baseline) | | | |
 | w4a16 | int4 | dflash2 | recipe (upstream measured depth quality once, on a single 4090: 96.0% GSM8K, 100k needle retrieved; untested on TP=2) | | | |
 | w4a16 | k4v2 (KVarN) | dflash2 | recipe (upstream measured the MTP lane on one 3090: 262k fits, 2.13x decode at 112k; the dflash2 cell is ours to fill) | | | |
+| w4a16 | k4v2 (KVarN) | mtp | recipe (upstream's CTX=huge SPEC=mtp lane, single 3090: 2.13x decode at 112k, +0.16% PPL; the TP=2, 8-seat cell is ours to fill) | | | |
 | w4a16 | bf16 | mtp | valid, no recipe (the split-KV kernel's native path is bf16) | | | |
 | w4a16 | int4 | mtp | untested (does the 3D dispatch cover MTP verify, or is the 2D walk?) | | | |
 | w4a8 | int8 | dflash2 | recipe | | | |
@@ -79,7 +81,7 @@ on prefix-cache hits).
 Dockerfile          uv + pinned vLLM 0.28.0 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
 setup.py            bare-metal one-shot: venv, deps, patches, model prep
-recipes/            the seven serve configurations
+recipes/            the eight serve configurations
 prepare/            build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py -- model prep + idempotent patching (runs standalone)
 patches/            the 34 vLLM patches (below)
 docker/             entrypoint.sh, prepare.sh
@@ -123,7 +125,7 @@ fall back to a full copy.
 
 ```bash
 ./setup.py             # venv + pinned deps + the 30 patches + all three models (DSPARK=/path redirects the DSpark dir; =0 skips it; SWIFT=1 adds the ~20 GB Swift variant)
-bash recipes/w4a16-int8-dflash2.sh  # or any of the other five
+bash recipes/w4a16-int8-dflash2.sh  # or any of the other seven
 ```
 
 `setup.py` is idempotent — re-run it any time; it is also the recovery
@@ -206,7 +208,7 @@ patches below extend the native implementation instead.
 - `marlin-int8-negative-scales.patch` — correctness fix for negative group scales in W4A8
 - `marlin-repack-staged-sm80.patch` — staged Marlin repack (load-time allocation hygiene; the header records #27's corrected history — the old "VMM churn" theory was disproven)
 - `marlin-tune-table.patch` — routes `marlin_gemm` through a locally built tunable Marlin extension (`VLLM_MARLIN_TUNE=1`, a no-op without that build): +3-7% on the M≤16 decode/verify GEMMs, +2-20% on W4A8 chunked-prefill GEMMs
-- `mamba-align-checkpoint-order.patch` — retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238). Ships default off; all seven recipes default it on (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`)
+- `mamba-align-checkpoint-order.patch` — retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238). Ships default off; all eight recipes default it on (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`)
 - `mamba-align-retire-null-gaps.patch` — retires mamba align-mode state blocks across null gaps instead of holding them until the request ends (upstream backport of vllm#55450): a 480k-token prefill leaves 71 retained state blocks per Mamba group where 8-9 is the bound — peak pool pressure exactly where the k4v2 lane runs. The 0.28.0 sync left it pending a 3090 A/B against our `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` default (both touch the align-snapshot free path); it is adopted with the KVarN lane, which the v2-runner patch was cut against, and upstream #101 measured it inert on the dflash2 profile
 - `mamba-chunked-prefill-align.patch` — correctness fix: GDN/Mamba state loss and NaN during chunked prefill (the state-copy source column, and an uninitialized-memory mask in the flash-linear-attention chunk-o kernel)
 - `offload-dflash-eagle-groups.patch` — OffloadingConnector group flagging under dflash
@@ -269,6 +271,20 @@ default) — adopted in this sync.
   KVarN + MTP + prefix caching corrupts prompt_logprobs (perplexity ~23%
   high, NaN 400s); this recipe's dflash2 drafter is clean on that combo.
   Compare outputs against w4a16-bf16-dflash2 before trusting it.
+- **w4a16-k4v2-mtp**: the full 262k context with no separate drafter
+  model: the upstream single-user launcher's CTX=huge SPEC=mtp lane
+  (DRAFT_TOKENS=3, its huge default) at TP=2 with 8 seats for the 4-8
+  concurrent range. Upstream measurements (single 3090, not ours): 262k
+  fits, needle-in-a-haystack correct at 4k...240k, perplexity +0.16%,
+  prefill within +/-5% of fp8, and the decode tax runs ~6% on short
+  prompts to 2.13x at 112k. The launcher's 200k default is the single
+  card's pool cap (one 262k request needs ~5.05 GiB of the 4.90 GiB pool,
+  upstream PR #13), not the shape: at TP=2 the request's KV shards across
+  both cards, so the recipe serves the full 262144. Upstream gotcha 51 /
+  #64: KVarN + MTP + prefix caching corrupts prompt_logprobs (perplexity
+  ~23% high, NaN 400s); ordinary generation is not implicated. Measure
+  quality with prefix caching off for the run (EXTRA_ARGS); serve with it
+  on. The TP=2 C4-C8 cell is ours to fill.
 - **w4a8-int8-dflash2 is a quality-for-speed trade**: the default MLP-only
   layer set costs +2.2% PPL for +13-14% prefill; `INT8_LAYERS=all` (the
   recipe expands the upstream shorthand to `mlp|linear_attn|self_attn`) is
