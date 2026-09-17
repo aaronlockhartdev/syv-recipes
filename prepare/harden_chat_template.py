@@ -25,6 +25,7 @@ Usage:
     # default: every models/*/chat_template.jinja under this repo
 """
 import os
+import re
 import sys
 
 OLD = r"""                {%- if tool_call.arguments is defined and tool_call.arguments != '' %}
@@ -52,14 +53,21 @@ NEW = r"""                {%- if tool_call.arguments is defined and tool_call.ar
                     {%- endif %}
                 {%- endif %}"""
 
-MARKER = "tool_call.arguments is mapping"
+# A template is already array-safe when it branches on `...arguments is mapping`
+# before iterating arguments. The stock Qwen3 template (and the NEW text above)
+# name it `tool_call.arguments`; the froggeric template our builders install
+# (froggeric/Qwen-Fixed-Chat-Templates v22.5) names it `tc.arguments`. Local
+# deviation from upstream 5cb22b3: its marker knows only the stock name, so it
+# reports `unknown` for the froggeric template (which already carries the
+# branch); matching the shape instead silences that false warning.
+ALREADY_HARDENED = re.compile(r"\barguments is mapping\b")
 
 
 def harden(path: str) -> str:
     """Return 'hardened', 'ok' or 'unchanged'."""
     with open(path) as f:
         src = f.read()
-    if MARKER in src:
+    if ALREADY_HARDENED.search(src):
         return "unchanged"
     if OLD not in src:
         return "unknown"  # template differs; leave it alone, do not guess

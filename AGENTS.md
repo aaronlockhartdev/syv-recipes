@@ -107,6 +107,18 @@ combination is new to the matrix).
   full-vocab head and the dflash2/dspark drafters (base-trained) are
   unmeasured on it. The Swift Open License is restrictive (free up to
   $1M ARR) -- the dir is fetched and built, never committed.
+- **The chat-template hardener recognises the froggeric template**
+  (`prepare/harden_chat_template.py`; local deviation from upstream
+  5cb22b3): our builders install the froggeric/Qwen-Fixed-Chat-Templates
+  v22.5 template, which is already array-argument safe (its
+  `tc.arguments is mapping` branch is the same protection the hardener
+  adds to the stock Qwen3 template) and already maps the gpt-5
+  reasoning-effort vocabulary (upstream's `translate_chat_template.py`,
+  gotcha 58, is therefore not needed here). Upstream's marker knows only
+  the stock variable name and reports our template `unknown` on every
+  run; the local regex matches any `arguments is mapping` branch →
+  `unchanged`, no warning. A genuinely unrecognised template still warns
+  and never fails prepare.
 - **Mamba align-snapshot retention is on by default**
   (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` in every recipe — the patch
   ships off; deviation). All recipes run `--mamba-cache-mode align`,
