@@ -112,7 +112,7 @@ exec vllm serve "$MODEL" \
   --kv-cache-dtype int4_per_token_head \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
-  --max-num-batched-tokens 16384\
+  --max-num-batched-tokens 8192 \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --mamba-cache-mode align \
