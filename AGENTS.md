@@ -15,9 +15,9 @@ into comment claims, into this file). This repo owns the deployment layer:
 which recipes exist, their default flag values, naming, scripts, and
 packaging. A change here that conflicts with an upstream technical fact
 needs upstream evidence for it, or an explicit "deviation from upstream"
-disclosure in the recipe header (there are three known ones, all disclosed).
+disclosure in the recipe header (all deviations are disclosed there).
 
-## The six recipes
+## The seven recipes
 
 | recipe | stack | one-liner |
 |---|---|---|
@@ -25,6 +25,7 @@ disclosure in the recipe header (there are three known ones, all disclosed).
 | `w4a16-int8-mtp` | TRITON_ATTN, int8 KV, MTP head, PIECEWISE graphs | no separate drafter |
 | `w4a16-bf16-dflash2` | FLASH_ATTN, bf16 KV, dflash2 | the unquantized quality baseline |
 | `w4a16-int4-dflash2` | TRITON_ATTN, int4 KV, dflash2, `--prefix-match-unit 848` | ~2x the context capacity |
+| `w4a16-k4v2-dflash2` | KVarN backend (kvarn_k4v2_g128), dflash2, `--block-size 128`, `--prefix-match-unit 128` | the full 262k context, ~2x the int4 pool |
 | `w4a8-int8-dflash2` | dflash2 + W4A8 Marlin linears (INT8_LAYERS) | faster prefill, documented quality cost |
 | `w4a16-int8-dspark` | TRITON_ATTN, int8 KV, DSpark bf16 community drafter (RadixArk) | upstream-measured slower than the dflash2 head on their shape; unmeasured on ours |
 
@@ -35,7 +36,7 @@ combination is new to the matrix).
 
 ## Invariants
 
-- **`patches/` is the synced set (30).** They apply in alphabetical = build
+- **`patches/` is the synced set (34).** They apply in alphabetical = build
   order because later patches depend on files created by earlier ones.
   They are the upstream files verbatim (`upstream/synced` names the
   upstream commit they come from); their headers carry the provenance
@@ -47,14 +48,17 @@ combination is new to the matrix).
   corrupts one prompt length in 128 (residue `k+1`) under prefix-cache hits.
 - **int4 KV must keep `--prefix-match-unit 848`** (drafter sliding-window
   block vs hash unit) or the prefix cache can never match.
+- **k4v2 (KVarN) must keep `--block-size 128` and `--prefix-match-unit 128`** — the variance-normalization tile is the block, and the prefix hash unit must equal it, so cache hits land on tile boundaries; a non-multiple of 128 corrupts the pool (upstream single-user launcher). The k4v2 analogue of the int4 848 rule.
 - **fp8 KV is excluded** — deterministic Xid-31 on 3090-class (upstream
   issue #34). That is also why our MTP recipe is int8 KV rather than
   upstream's fp8/FlashInfer lane.
 - **No WSL2 support** anywhere in this repo (upstream had a whole WSL2
-  lane; it is out of scope here). Likewise no env vars for upstream
-  features this repo deliberately dropped (KVarN and its 4/2-bit KV lane,
-  the WSL2 lane). The lookup/chain envs (`VLLM_DFLASH2_LOOKUP`,
-  `VLLM_DFLASH2_CHAIN`) exist in the patch set — both adopted in the
+  lane; it is out of scope here), and no env vars for it. KVarN was dropped
+  with that lane at the fork and is now adopted (w4a16-k4v2-dflash2, user
+  decision): its modules carry `KVARN_*` env vars, all with built-in
+  defaults; the recipe sets only `KVARN_POOL_MEM_FRAC`.
+- **The lookup/chain envs** (`VLLM_DFLASH2_LOOKUP`, `VLLM_DFLASH2_CHAIN`)
+  exist in the patch set — both adopted in the
   0.28.0 sync, both off by default, enabled by `.env` only.
 - **DFlash2 is native in vLLM 0.28.0** (upstream PR #52816); the 0.27.1
   `dflash2-backport` is retired. The `dflash2-*` patches extend the native
@@ -66,7 +70,7 @@ combination is new to the matrix).
   #73): on 0.28.0 the native speculator base allocates the draft-logits
   buffer only when the config asks; without it the rejection test loses
   its denominator and acceptance drops ~16% (101.4 vs 121.7 tok/s
-  upstream). All five drafter recipes (the four dflash2 and the dspark) set
+  upstream). All six drafter recipes (the five dflash2 and the dspark) set
   it to probabilistic; the MTP recipe has always set it.
 - **Vision is on** (no `--language-model-only`) — two 24 GB cards are not
   VRAM-limited; the tower offloads to pinned host RAM by default
@@ -130,9 +134,9 @@ combination is new to the matrix).
 ```
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
-recipes/ the six *.sh
+recipes/ the seven *.sh
 prepare/ build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, patch_vllm.py, _ui.py
-patches/ the 30 synced patches
+patches/ the 34 synced patches
 ```
 
 Defaults: venv `.venv/`, models under `models/`, port 8080, and `Qwen3.8-
