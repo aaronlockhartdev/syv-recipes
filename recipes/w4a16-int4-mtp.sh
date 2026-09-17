@@ -1,0 +1,125 @@
+#!/bin/bash
+# w4a16-int8-mtp: Qwen's own MTP head (3 drafts, probabilistic), TP=2, prefix
+# caching, int8 per-token-head KV, vision enabled.
+#
+# Flags are what the upstream launcher produced for
+#   SPEC=mtp CTX=long PREFIX_CACHE=1 EXTRA_ARGS="--tensor-parallel-size 2"
+# with four deviations:
+#   1. int8 per-token-head KV on the Triton backend (upstream: fp8/FlashInfer)
+#      -- same per-token width, ~2x the pool of bf16.
+#      Upstream measured this exact lane on a single 3090 (SPEC=mtp, 120k
+#      context, concurrency 1): equal to their stock fp8/FlashInfer at
+#      8K depth, -22% decode at 25K, -34% decode / -44% fresh prefill at
+#      60K (TTFT 68.9 -> 122.6 s), +2.5% end-to-end at chat length,
+#      quality-neutral (GSM8K 96.5 vs 96.0, PPL +0.02%). Those are
+#      upstream single-card measurements, not ours; re-measure before
+#      trusting them at your context depth.
+#   2. VLLM_SPEC_DECODE_ATTN=1. Upstream enabled the split-KV verify kernel
+#      only for bf16-KV and dflash2; patches/spec-decode-int8-kv.patch
+#      teaches it the int8 cache. Upstream never measured MTP with it, so
+#      validate draft acceptance on your workload.
+#   3. cudagraph_mode=PIECEWISE. The default (FULL_AND_PIECEWISE) has a
+#      documented MTP corruption: with a prefix-cache hit, one prompt length
+#      in 128 (here: length % 128 == 4) returns "" / "#" or fluent wrong
+#      text. Upstream forced PIECEWISE for MTP for correctness; at the
+#      served lengths it costs nothing measured.
+#   4. --max-num-batched-tokens 8192 (upstream ships 2048; its batch lane
+#      measured 2048 beating 8192 -- bigger chunks inflate the profiled
+#      activation peak, which shrinks the KV/state page pool). We accept
+#      the smaller pool for half the prefill steps. (--max-num-seqs 8 and
+#      the 32 capture size are the launcher's own MTP values.)
+#
+# The env vars support the patch stack; the vllm line is the complete
+# server configuration.
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(dirname "$DIR")"
+
+# .env at the repo root: fills any variable below that is unset or empty in
+# the real environment (which always wins); values may be quoted, whole-line
+# # comments only.
+if [ -f "$REPO/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|\#*) continue ;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    [ "$k" != "$line" ] || continue
+    k="${k%"${k##*[![:space:]]}"}"
+    case "$k" in ''|*[!A-Za-z0-9_]*|[0-9]*) continue ;; esac
+    # never let a .env flip a shell-control variable (GLOBIGNORE would
+    # silently disable the /dev/shm cleanup glob below, among others)
+    case "$k" in IFS|GLOBIGNORE|CDPATH|BASH_ENV|ENV|SHELLOPTS|PS1|LINENO|PWD|OLDPWD|SECONDS|RANDOM|UID|EUID) continue ;; esac
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    v="${v%$'\r'}"
+    v="${v#\"}"; v="${v%\"}"
+    if [ "${#v}" -ge 2 ] && [ "${v:0:1}" = "${v: -1}" ]; then
+      [ "${v:0:1}" = "'" ] && v="${v:1:${#v}-2}"
+    fi
+    [ -n "$v" ] || continue
+    [ -n "${!k:-}" ] || export "$k=$v"
+  done < "$REPO/.env"
+fi
+
+VENV=${VENV:-$REPO/.venv}
+MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
+PORT=${PORT:-8080}
+export PATH="$VENV/bin:$PATH"
+
+[ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
+if [ ! -x "$VENV/bin/vllm" ] && ! command -v vllm >/dev/null; then
+  echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
+fi
+
+# a dead engine leaves its /dev/shm offload region and the next boot dies on it (upstream #33)
+if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
+  for f in /dev/shm/vllm_offload_*.mmap; do
+    [ -e "$f" ] || continue
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[w4a16-int8-mtp] removing stale offload region $f"; rm -f "$f"; }
+  done
+fi
+
+# split-KV verify attention reading the int8 cache (see header)
+export VLLM_SPEC_DECODE_ATTN=1
+# vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
+# off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
+export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
+# torch sampler (flashinfer's needs nvcc to JIT)
+export VLLM_USE_FLASHINFER_SAMPLER=0
+# hold the mamba "align" state snapshots a multi-turn prefix hit resumes
+# from alive until the request ends (upstream #52 / vllm#45238;
+# patches/mamba-align-checkpoint-order.patch). That patch ships default
+# off -- we default it on (deviation); retention is bounded (<=3 blocks per
+# request per group). Set VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=0 to opt out.
+export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=${VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS:-1}
+# keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+
+# no --language-model-only: the server takes image input.
+# Vision: image count is unlimited; each image is capped at 2097152 px
+# = 2048 tokens, and that cap sets the encoder's profiled peak in the
+# KV pool (at most the 4096-token encoder budget). xxhash: faster
+# prefix-cache hashes than sha256.
+exec vllm serve "$MODEL" \
+  --served-model-name qwen3.8-27b \
+  --host 0.0.0.0 --port $PORT \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.93 \
+  --max-model-len auto \
+  --max-num-seqs 8 \
+  --api-server-count 1 \
+  --attention-backend TRITON_ATTN \
+  --kv-cache-dtype int4_per_token_head \
+  --mamba-ssm-cache-dtype float16 \
+  --async-scheduling \
+  --max-num-batched-tokens 16384\
+  --enable-prefix-caching \
+  --prefix-caching-hash-algo xxhash \
+  --mamba-cache-mode align \
+  --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
+  --compilation-config '{"max_cudagraph_capture_size":32,"cudagraph_mode":"PIECEWISE","custom_ops":["+rms_norm","+silu_and_mul"]}' \
+  --reasoning-parser qwen3 \
+  --enable-prompt-tokens-details \
+  --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+  ${EXTRA_ARGS:-}
