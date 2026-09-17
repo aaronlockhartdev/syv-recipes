@@ -104,11 +104,19 @@ if [ -f "$REPO/.env" ]; then
 fi
 
 VENV=${VENV:-$REPO/.venv}
-MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast}
+# Swift variant: a truthy SWIFT (1/true/yes, or /path, as in setup/prepare) serves
+# the Swift W4A16 model -- SWIFT_MODEL points at it (default: the build
+# destination) and wins over MODEL. Never point MODEL at the Swift dir:
+# setup.py builds the fast model into $MODEL.
+case "${SWIFT:-}" in
+  1|true|yes) MODEL=${SWIFT_MODEL:-$REPO/models/Qwen3.8-27B-Swift-W4A16} ;;
+  0|false|no|'') MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast} ;;
+  *) MODEL=${SWIFT_MODEL:-$SWIFT} ;;
+esac
 PORT=${PORT:-8080}
 export PATH="$VENV/bin:$PATH"
 
-[ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- run: python prepare/build_fast_model.py <dir> (or: docker run ... prepare)" >&2; exit 1; }
+[ -f "$MODEL/config.json" ] || { echo "no model at $MODEL -- build it first (prepare/build_fast_model.py; the Swift variant: prepare/build_swift_model.py; or: docker run ... prepare)" >&2; exit 1; }
 if [ ! -x "$VENV/bin/vllm" ] && ! command -v vllm >/dev/null; then
   echo "no vllm found -- create the uv venv first (README: Bare metal), or run this in the container" >&2; exit 1
 fi

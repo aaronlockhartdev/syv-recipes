@@ -12,7 +12,9 @@ models/Qwen3.8-27B-DSpark); every setup fetches all three by
 default -- DSPARK=/path redirects the DSpark dir, DSPARK=0 skips it.
 SWIFT=1 additionally builds the ukisai Swift W4A16 variant (models/
 Qwen3.8-27B-Swift-W4A16, ~20 GB); SWIFT=/path redirects it, and an
-unset or 0/false/no value skips it.
+unset or 0/false/no value skips it. The recipes serve the variant with
+the same variable: a truthy SWIFT makes them serve $SWIFT_MODEL
+(default: the models/ build dir) instead of $MODEL.
 
 Runs under any python3 (the venv does not exist yet); it shells out to
 uv and to the venv's own python for the rest.

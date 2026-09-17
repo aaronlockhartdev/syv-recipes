@@ -94,12 +94,14 @@ combination is new to the matrix).
   dspark.py/dflash.py so the installed dir stays self-contained; an
   interrupted (partial) cache is completed, never treated as warm.
 
-- **The Swift variant is opt-in** (`SWIFT=1` in setup/prepare; `SWIFT=/path`
-  redirects): `prepare/build_swift_model.py` applies the fast model's
+- **The Swift variant is opt-in** (`SWIFT=1` in setup/prepare and in every recipe; `SWIFT=/path` redirects): `prepare/build_swift_model.py` applies the fast model's
   round-to-nearest operations (int8 group-128 lm_head/embed_tokens/MTP
   module, froggeric template) to jamesbrunet's W4A16-AutoRound quant of
   the ukisai reasoning-efficiency fine-tune (~58% fewer thinking tokens
-  at <1% accuracy on their benches). The GPTQ int4 upgrades and the 40k
+  at <1% accuracy on their benches). A truthy `SWIFT` makes the recipes
+  serve the variant: `MODEL` becomes `${SWIFT_MODEL:-<the build destination>}`
+  (SWIFT wins over MODEL; never point MODEL at the Swift dir — setup.py
+  builds the fast model into $MODEL). The GPTQ int4 upgrades and the 40k
   MTP draft head are deferred (they need the upstream drafter/ pipeline
   run against the fine-tune): until the re-fit lands, MTP runs the native
   full-vocab head and the dflash2/dspark drafters (base-trained) are

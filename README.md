@@ -154,7 +154,7 @@ The same overrides can live in a `.env` file at the repo root instead:
 every recipe and both `setup.py` and `patch_vllm.py` read it, but only for
 a variable that is unset or empty in the real environment, which always
 wins. Values may be quoted; whole-line `#` comments only. The variables the
-scripts and recipes consume are `VENV`, `MODEL`, `DRAFT`, `DSPARK`, `SWIFT`, `PORT` and `EXTRA_ARGS` (e.g.
+scripts and recipes consume are `VENV`, `MODEL`, `DRAFT`, `DSPARK`, `SWIFT`, `SWIFT_MODEL`, `PORT` and `EXTRA_ARGS` (e.g.
 `VENV=/data/qwen/.venv`); note the `VLLM_*` env vars each recipe hard-exports
 are always set by the recipe itself, so a `.env` cannot change them.
 `EXTRA_ARGS` is special: every recipe appends it (unquoted) at the end of its
@@ -400,8 +400,7 @@ lane read os.environ directly) is in the set again with the regeneration.
   perplexity/GSM8K against w4a16-int8-dflash2 before trusting it.
   `./setup.py` (or the container's w4a16-int8-dspark arm) fetches the
   checkpoint by default (`DSPARK=/path` redirects, `=0` skips it).
-- **The ukisai Swift variant (opt-in: `SWIFT=1` in either prep; `SWIFT=/dir`
-  redirects)**: ukisai/Swift-Qwen3.8-27b is a reasoning-efficiency fine-tune
+- **The ukisai Swift variant (opt-in: `SWIFT=1` in setup, prepare, and every recipe; `SWIFT=/dir` redirects)**: ukisai/Swift-Qwen3.8-27b is a reasoning-efficiency fine-tune
   of the base model -- their headline is ~58% fewer thinking tokens at <1%
   accuracy cost on their benches (served bf16 on big boxes).
   `jamesbrunet/Swift-Qwen3.8-27b-W4A16-AutoRound` (ungated, ~20 GB) is its
@@ -418,8 +417,10 @@ lane read os.environ directly) is in the set again with the regeneration.
   before trusting them. UkisAI's Swift Open License v1.0 (free up to $1M
   revenue, enterprise above) is restrictive, so the dir is fetched and
   built, never committed. Serve:
-  `MODEL=models/Qwen3.8-27B-Swift-W4A16 bash recipes/w4a16-int8-mtp.sh`
-  (any recipe loads the dir).
+  `SWIFT=1 bash recipes/w4a16-int8-mtp.sh` (any recipe loads the dir;
+  `SWIFT_MODEL=/dir` points at a differently-placed dir). Do not put the Swift
+  dir in `MODEL` -- `setup.py` builds the fast model into `$MODEL` and would
+  clobber it.
 - **Multi-turn prefix caching**: `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS`
   (on by default in the recipes — the patch ships it off; set it to 0
   to opt out) keeps the mamba state snapshots a conversation's hits
