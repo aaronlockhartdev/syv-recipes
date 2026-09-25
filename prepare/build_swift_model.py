@@ -10,10 +10,12 @@ built-in cache (so re-runs never re-download):
       tokens, +0.35% vs the base, 9.18x speed-up on ukisai's benches. As
       published: 4-bit symmetric group-128 linears (a native AutoRound
       export, GPTQ-style packed), bf16 lm_head / embed_tokens / MTP module,
-      ~19.6 GB over 5 shards + one extra-tensors file. The repo is GATED:
-      the download needs the account's HF_TOKEN plus a one-time acceptance
-      of UkisAI's Swift Open License v1.0 (restrictive terms) on the HF
-      page -- the dir is fetched and built here, never committed.
+      ~19.6 GB over 5 shards + one extra-tensors file. The repo's card
+      declares it gated, but the HF API currently resolves it ungated
+      (2026-09-25): if a fetch is ever refused, the download needs the
+      account's HF_TOKEN plus a one-time acceptance of UkisAI's Swift
+      Open License v1.0 (restrictive terms) on the HF page -- the dir
+      is fetched and built here, never committed.
 
 The published quant is not loadable by vLLM (quant_method 'auto-round'),
 so the first local step is a format conversion, run on the assembled dir
@@ -475,7 +477,11 @@ def main():
 
     hub_idx = json.load(open(os.path.join(hub, "model.safetensors.index.json")))
     wm = hub_idx["weight_map"]
-    embed_key = next(k for k in wm if k.endswith("embed_tokens.weight"))
+    embed_keys = [k for k in wm if k.endswith("embed_tokens.weight")]
+    if len(embed_keys) != 1:
+        ui.fail(f"expected one embed_tokens weight, found {len(embed_keys)}",
+                "This script assumes the published layout; check the repo")
+    embed_key = embed_keys[0]
     mtp_files = {wm[m + ".weight"] for m in MTP_LINEARS}
     if len(mtp_files) != 1:
         ui.fail(f"the mtp linears span several files: {sorted(mtp_files)}",

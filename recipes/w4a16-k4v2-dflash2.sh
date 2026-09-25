@@ -37,8 +37,10 @@
 # --prefix-cache-retention-interval 13056: at 7 drafts the attention block
 # is 2176 tokens, and vLLM's default dense retention means two long
 # conversations advanced in turn evict each other's mamba snapshots (0%
-# prefix reuse, a full re-prefill every turn); one in six (6 x 2176) keeps
-# 93-99.5% (upstream #174, single 3090 -- their measurement, not ours).
+# prefix reuse, a full re-prefill every turn); one in six (6 x 2176) kept
+# 93-99.5% on 0.28; on 0.29 the first reuse after a cold turn lands on the
+# last retained snapshot (80.0% at 32.6k) and the turns after it run
+# 99.3-99.4% (upstream #174, single 3090 -- their measurement, not ours).
 # The split-KV verify attention (VLLM_SPEC_DECODE_ATTN) reads bf16/int8
 # caches only, so it is off here: the KVarN backend brings its own
 # dequant verify path (upstream: KVARN_FUSED_VERIFY, on by default).

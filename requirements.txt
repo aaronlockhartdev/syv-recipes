@@ -8,5 +8,5 @@ compressed-tensors==0.17.0
 huggingface_hub==1.28.0
 hf_xet==1.6.0
 ninja==1.13.0
-# required by --prefix-caching-hash-algo xxhash in all six recipes
+# required by --prefix-caching-hash-algo xxhash in all nine recipes
 xxhash==4.0.1

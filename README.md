@@ -191,7 +191,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 # optional: the DSpark drafter (for recipes/w4a16-int8-dspark.sh)
 .venv/bin/python prepare/fetch_dspark.py          models/Qwen3.8-27B-DSpark
-# optional: the ukisai Swift 1.5 variant, W4A16 (~19.6 GB, gated; see the Notes bullet)
+# optional: the ukisai Swift 1.5 variant, W4A16 (~19.6 GB; see the Notes bullet)
 .venv/bin/python prepare/build_swift_model.py     models/Qwen3.8-27B-Swift-W4A16
 ```
 
@@ -359,8 +359,8 @@ n-gram chains are in the set (both off by default).
   profiler's peak read ~1 GiB high and its graph-memory estimate up to
   5.44 GiB against a 0.23 GiB real pool, refusing boots that pass warm.
   Upstream re-measured its 0.29.0 matrix on its own boxes (not ours):
-  decode +7..+17% per profile at C1-C8, perplexity and GSM8K identical to
-  0.28, the fast-profile KV pool up 66,692 -> 77,872 tokens, the KVarN
+  decode +7..+17% per profile at C1-C8, perplexity identical and GSM8K 0.89 ->
+  0.93 on the huge profile (upstream: 'equal quality'), the fast-profile KV pool up 66,692 -> 77,872 tokens, the
   huge-context pool 221,238 -> 281,415, needle retrieval intact at
   32k/90k/200k (upstream docs/vllm-0.29.md). Adopted here by decision:
   `auth-deny-default` (upstream #169) — with `--api-key` set, every path
@@ -442,7 +442,7 @@ n-gram chains are in the set (both off by default).
   (a 9.18x speed-up claim on ukisai's benches; served bf16 on big boxes).
   The build source is ukisai's own W4A16 AutoRound quant of it
   (`ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound`, ~19.6 GB over 5
-  shards, GATED), and `prepare/build_swift_model.py` turns it into a
+  shards), and `prepare/build_swift_model.py` turns it into a
   servable dir: first it converts the native AutoRound export (GPTQ-packed
   qweight/scales, `quant_method: auto-round`, which vLLM cannot load) to
   the compressed-tensors pack-quantized shape, then applies the same
@@ -450,8 +450,9 @@ n-gram chains are in the set (both off by default).
   `lm_head` (~1.3 GB freed), `embed_tokens` (~1.3 GB) and the MTP module
   (~0.4 GB; the published config would otherwise refuse any speculative
   load) -- plus the froggeric template; one CPU pass, ~8 GB RAM. The
-  download is gated: accept UkisAI's Swift Open License once on the HF
-  page, and keep `HF_TOKEN` in the environment for the fetch. What it is
+  repo's card declares it gated, but the HF API currently resolves it
+  ungated (2026-09-25): if a fetch is ever refused, accept UkisAI's Swift Open
+  License on the HF page and set `HF_TOKEN` for the fetch. What it is
   *not* yet: the GPTQ-calibrated int4 heads and the 40k MTP draft head
   need the upstream drafter/ training pipeline run against this fine-tune
   (deferred) -- until then the MTP recipe runs the native full-vocab
