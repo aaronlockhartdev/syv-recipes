@@ -440,16 +440,16 @@ n-gram chains are in the set (both off by default).
 - **The ukisai Swift variant (opt-in: `SWIFT=1` in setup, prepare, and every recipe; `SWIFT=/dir` redirects)**: ukisai/Swift-1.5-Qwen3.8-27b is a reasoning-efficiency fine-tune
   of the base model -- 58.5% fewer thinking tokens, +0.35% vs the base
   (a 9.18x speed-up claim on ukisai's benches; served bf16 on big boxes).
-  The build source is ukisai's own W4A16 AutoRound quant of it
-  (`ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound`, ~19.6 GB over 5
-  shards), and `prepare/build_swift_model.py` turns it into a
-  servable dir: first it converts the native AutoRound export (GPTQ-packed
-  qweight/scales, `quant_method: auto-round`, which vLLM cannot load) to
-  the compressed-tensors pack-quantized shape, then applies the same
-  operations the fast model gets -- round-to-nearest int8 group-128 for
-  `lm_head` (~1.3 GB freed), `embed_tokens` (~1.3 GB) and the MTP module
-  (~0.4 GB; the published config would otherwise refuse any speculative
-  load) -- plus the froggeric template; one CPU pass, ~8 GB RAM. The
+  The build source is ukisai's own W4A16 AWQ quant of it
+  (`ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AWQ`, ~19.6 GB over 6 shards + a
+  bf16 MTP file) -- an LLM-Compressor export that is already a loadable
+  compressed-tensors format (4-bit asymmetric group-128), so
+  `prepare/build_swift_model.py` needs no conversion pass: it applies the
+  same operations the fast model gets -- round-to-nearest int8 group-128
+  for `lm_head` (~1.3 GB freed), `embed_tokens` (~1.3 GB) and the MTP
+  module (~0.4 GB; the published config would otherwise refuse any
+  speculative load) -- adds the matching int8 config groups, and installs
+  the froggeric template; one CPU pass, ~10 GB RAM. The
   repo's card declares it gated, but the HF API currently resolves it
   ungated (2026-09-25): if a fetch is ever refused, accept UkisAI's Swift Open
   License on the HF page and set `HF_TOKEN` for the fetch. What it is
