@@ -1,16 +1,12 @@
-KVarN module files for vLLM 0.28.0 (create-only).
+KVarN module files for vLLM 0.29.0 (create-only).
 
 The KVarN backend modules (quantization config, Triton kernels, the
-
-KVarNAttentionBackend) that the kvarn-0.28.0 and kvarn-v2-runner-0.28.0
-
+KVarNAttentionBackend) that the kvarn-0.29.0 and kvarn-v2-runner-0.29.0
 patches wire into the vLLM tree. Copied from kvarn/files/vllm/ in the
-
 upstream repo, which ports the KVarN (huawei-csl, Apache-2.0) backend
+from its vLLM 0.23 fork onto the 0.29.0 this repo runs.
 
-from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
-
---- generated against the v0.28.0 tree after the active repo patches ---
+--- generated against the v0.29.0 tree after the active repo patches ---
 
 --- /dev/null
 +++ b/model_executor/layers/quantization/kvarn/__init__.py
@@ -36,13 +32,15 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +__all__ = ["KVarNConfig", "KVARN_PRESETS"]
 --- /dev/null
 +++ b/model_executor/layers/quantization/kvarn/config.py
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,446 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""KVarN configuration."""
 +
 +import math
 +import os
++
++import vllm.envs as envs
 +from dataclasses import dataclass
 +
 +# Named KVarN presets: each maps to a frozen set of config parameters.
@@ -168,7 +166,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        offsets below are unchanged either way (trailing pad only), and every
 +        kernel reads ``kv_cache.stride(0/1)`` rather than assuming a size, so the
 +        two layouts are byte-compatible."""
-+        if self.head_dim >= 256 and os.environ.get("KVARN_POW2_SLOT", "0") == "1":
++        if self.head_dim >= 256 and envs.KVARN_POW2_SLOT:
 +            slot = math.ceil(self.tile_bytes / self.group)
 +            slot_pow2 = 1 << (slot - 1).bit_length()
 +            aligned = slot_pow2 * self.group
@@ -279,7 +277,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        Fallback (weights unknown): the legacy ``frac · total`` with
 +        POOL_MEM_FRAC_DEFAULT, so behaviour is unchanged when we cannot read the
 +        weight size."""
-+        env = os.environ.get("KVARN_POOL_MEM_FRAC")
++        env = envs.KVARN_POOL_MEM_FRAC
 +        if weight_bytes is not None and gpu_memory_utilization is not None:
 +            share = float(env) if env is not None else self.POOL_USABLE_SHARE_DEFAULT
 +            usable = gpu_memory_utilization * total_gpu_bytes - weight_bytes
@@ -344,7 +342,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    @classmethod
 +    def fa_scratch_cap(cls) -> int:
 +        """Token cap of the shared FA materialize scratch (KVARN_FA_SCRATCH_CAP)."""
-+        env = os.environ.get("KVARN_FA_SCRATCH_CAP")
++        env = envs.KVARN_FA_SCRATCH_CAP
 +        return int(env) if env else cls.FA_SCRATCH_CAP_DEFAULT
 +
 +    @classmethod
@@ -471,8 +469,8 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        # Optional env override for Sinkhorn iteration count (KVARN_SINKHORN_ITERS).
 +        # Default 16 mirrors the paper; useful for testing convergence at large
 +        # model scale (e.g. 48-layer 30B-A3B-Thinking-2507 may benefit from more).
-+        iters = int(os.environ.get("KVARN_SINKHORN_ITERS", "8"))
-+        sink_tokens = int(os.environ.get("KVARN_SINK_TOKENS", "128"))
++        iters = envs.KVARN_SINKHORN_ITERS
++        sink_tokens = envs.KVARN_SINK_TOKENS
 +        return KVarNConfig(
 +            head_dim=head_dim,
 +            key_bits=preset["key_bits"],
@@ -626,7 +624,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    return balanced, sc_best, sr_best
 --- /dev/null
 +++ b/v1/attention/backends/kvarn_attn.py
-@@ -0,0 +1,2743 @@
+@@ -0,0 +1,2770 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""KVarN attention backend.
@@ -667,12 +665,13 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +
 +import functools
 +import math
-+import os
 +from dataclasses import dataclass, field
 +from typing import Any, ClassVar
 +
 +import torch
 +import torch.nn.functional as F
++
++import vllm.envs as envs
 +
 +from vllm.config.cache import CacheDType
 +from vllm.v1.attention.backend import (
@@ -686,6 +685,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    CommonAttentionMetadata,
 +    MultipleOf,
 +)
++from vllm.v1.kv_cache_interface import KVCacheLayout
 +from vllm.v1.attention.backends.fa_utils import (
 +    get_flash_attn_version,
 +    is_flash_attn_varlen_func_available,
@@ -830,6 +830,17 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    @staticmethod
 +    def get_name() -> str:
 +        return "KVARN"
++
++    @classmethod
++    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
++        # port(0.29): vLLM 0.29 derives every layer's physical layout from its
++        # spec ([B, H, N, C] bytes; get_kv_cache_shape is no longer consulted).
++        # KVarN needs the N per-token slots of one head to sit back to back so
++        # they fold into the one tile per (block, head) its kernels address:
++        # physical order [L, B, H, N, C], which is LBHNC (the enum letters are
++        # the physical order; LBNHC puts tokens outside heads and the fold's
++        # view() refuses it, which is the intended loud failure).
++        return (KVCacheLayout.LBHNC,)
 +
 +    @staticmethod
 +    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -1040,7 +1051,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    # KVARN_FUSED_VERIFY=0 reverts to single-token-only support.
 +    _cudagraph_support: ClassVar[AttentionCGSupport] = (
 +        AttentionCGSupport.UNIFORM_BATCH
-+        if os.environ.get("KVARN_FUSED_VERIFY", "1") == "1"
++        if envs.KVARN_FUSED_VERIFY
 +        else AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 +    )
 +
@@ -1069,7 +1080,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        self._init_reorder_batch_threshold(
 +            1,
 +            supports_spec_as_decode=(
-+                os.environ.get("KVARN_FUSED_VERIFY", "1") == "1"),
++                envs.KVARN_FUSED_VERIFY),
 +        )
 +        # KV-cache-group key, must match KVarNAttentionImpl._group_key for this
 +        # group's layers so the builder mutates the right group's slot allocator.
@@ -1819,7 +1830,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        # (head_size, num_kv_heads, sliding_window) uniquely identifies the group
 +        # and is computable identically by the per-group builder and each impl.
 +        self._group_key = (head_size, self.num_kv_heads, self.sliding_window)
-+        if os.environ.get("KVARN_DBG_LAYERS") == "1":
++        if envs.KVARN_DBG_LAYERS:
 +            print(f"[KVARN_LAYER] head_size={head_size} num_heads={num_heads} "
 +                  f"num_kv_heads={self.num_kv_heads} sliding_window={self.sliding_window}",
 +                  flush=True)
@@ -1968,7 +1979,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +            # memory budget — making the pool both exhaustion-safe (the scheduler
 +            # can never exceed it) and OOM-safe (it is <= the budget). No
 +            # per-model tuning; KVARN_POOL_SLOTS still pins the count exactly.
-+            env_slots = int(os.environ.get("KVARN_POOL_SLOTS", "0"))
++            env_slots = envs.KVARN_POOL_SLOTS
 +            if env_slots > 0:
 +                pool_size = max(env_slots, 64)
 +            else:
@@ -2187,7 +2198,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        Over-sizing costs 4 B per slot and nothing in-kernel: every kernel
 +        guards ``block_id < NUM_BLOCKS_LOOKUP``. ``KVARN_LOOKUP_BLOCKS`` pins it.
 +        0 when no bound can be derived (unit tests): the 1024 floor applies."""
-+        env = int(os.environ.get("KVARN_LOOKUP_BLOCKS", "0"))
++        env = envs.KVARN_LOOKUP_BLOCKS
 +        if env > 0:
 +            return env
 +        try:
@@ -2211,7 +2222,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        16 / equality to 1 -- for the warmup launch and the first real launches,
 +        so a warmup-vs-serving variant mismatch can be read off the log rather
 +        than inferred (``--jit-monitor-verbose`` truncates the attrs)."""
-+        if os.environ.get("KVARN_SPEC_DEBUG", "0") != "1":
++        if not envs.KVARN_SPEC_DEBUG:
 +            return
 +        cls = type(self)
 +        counts = cls.__dict__.get("_spec_debug_count")
@@ -2357,7 +2368,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        # deployment, don't compile/autotune it here either.
 +        if (_qlen >= 2
 +                and ((_qlen * qpk_pad) & (_qlen * qpk_pad - 1)) == 0
-+                and os.environ.get("KVARN_SHARED_VERIFY", "0") == "1"):
++                and envs.KVARN_SHARED_VERIFY):
 +            from vllm.v1.attention.ops.triton_kvarn_decode import (
 +                _kvarn_fused_verify_stage1,
 +            )
@@ -2433,6 +2444,18 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +
 +    def _hadamard(self, device: torch.device) -> torch.Tensor:
 +        return _build_hadamard(self.head_size, device)
++
++    @staticmethod
++    def _as_tile_view(kv_cache: torch.Tensor) -> torch.Tensor:
++        """port(0.29): fold the runner's ``[B, H, N, C]`` byte view into the
++        ``(num_blocks, num_kv_heads, tile_bytes_aligned)`` view the kernels and
++        ``_flat_block`` address. The spec publishes one ``tile_bytes_aligned //
++        group`` slot per token, so N * C is exactly one tile; under LBNHC the
++        N and C dims are contiguous, and ``view`` (not ``reshape``) makes a
++        wrong layout fail loudly instead of silently copying."""
++        if kv_cache.dim() == 4:
++            return kv_cache.view(kv_cache.shape[0], kv_cache.shape[1], -1)
++        return kv_cache
 +
 +    def _flat_block(self, kv_cache: torch.Tensor, block_id: int, head: int) -> torch.Tensor:
 +        """Contiguous ``[tile_bytes_aligned]`` uint8 view for one (block, head).
@@ -2587,7 +2610,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        layout; only the data movement is batched."""
 +        if not flush_pairs:
 +            return
-+        if os.environ.get("KVARN_FAST_FLUSH", "1") != "1":
++        if not envs.KVARN_FAST_FLUSH:
 +            return cls._batched_flush_legacy(flush_pairs)
 +
 +        cfg = flush_pairs[0][0].kvarn_config
@@ -2700,7 +2723,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +            V_stack = torch.stack(V_list, dim=0)
 +            # Optional: dump first chunk's raw (pre-Sinkhorn) tiles for outlier
 +            # analysis (KVARN_DUMP_TILES=/path/to/file.pt).
-+            dump_path = os.environ.get("KVARN_DUMP_TILES", "")
++            dump_path = envs.KVARN_DUMP_TILES
 +            if dump_path and not getattr(cls, "_tiles_dumped", False):
 +                cls._tiles_dumped = True
 +                # Capture per-tile (layer_idx, block_id) for per-layer analysis.
@@ -2768,6 +2791,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        N = slot_mapping.shape[0]
 +        if N <= 0:
 +            return
++        kv_cache = self._as_tile_view(kv_cache)
 +        device = key.device
 +        Hk = self.num_kv_heads
 +        D = self.head_size
@@ -2830,6 +2854,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    ) -> torch.Tensor:
 +        num_tokens = query.shape[0]
 +        device = query.device
++        kv_cache = self._as_tile_view(kv_cache)
 +
 +        if output is None:
 +            output = torch.zeros(
@@ -3202,11 +3227,11 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +        # continuations), where one materialization amortizes over thousands
 +        # of query tokens. KVARN_FUSED_VERIFY=0 forces materialize always.
 +        _group = self.kvarn_config.group
-+        if (os.environ.get("KVARN_FUSED_VERIFY", "1") == "1"
++        if (envs.KVARN_FUSED_VERIFY
 +                and md.max_query_len
-+                <= int(os.environ.get("KVARN_FUSED_VERIFY_MAXQ", "8"))
++                <= envs.KVARN_FUSED_VERIFY_MAXQ
 +                and (int(md.max_seq_len) + _group - 1) // _group
-+                >= int(os.environ.get("KVARN_FUSED_VERIFY_MIN_BLOCKS", "64"))
++                >= envs.KVARN_FUSED_VERIFY_MIN_BLOCKS
 +                and B > 0):
 +            return self._fused_verify_path(q, kv_cache, md)
 +        if (not _HAS_FLASH_ATTN or self.head_size > 256
@@ -3493,7 +3518,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    return (q * s_row + zp) * s_col
 --- /dev/null
 +++ b/v1/attention/ops/kvarn_store.py
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,286 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""KVarN tile-level store reference (pure PyTorch).
@@ -3513,9 +3538,10 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +
 +from __future__ import annotations
 +
-+import os
 +
 +import torch
++
++import vllm.envs as envs
 +
 +from vllm.model_executor.layers.quantization.kvarn.sinkhorn import (
 +    variance_normalize,
@@ -3529,7 +3555,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    for k2v2 on models like Qwen3-30B-A3B-Thinking where K outliers
 +    (max/std ≈ 6) waste 2-bit resolution.
 +    """
-+    q_str = os.environ.get("KVARN_RTN_QUANTILE", "")
++    q_str = envs.KVARN_RTN_QUANTILE
 +    if q_str and float(q_str) > 0:
 +        q = float(q_str)
 +        lo = torch.quantile(t, q, dim=dim, keepdim=True)
@@ -3781,7 +3807,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    }
 --- /dev/null
 +++ b/v1/attention/ops/triton_kvarn_decode.py
-@@ -0,0 +1,1201 @@
+@@ -0,0 +1,1202 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""KVarN decode path — Stage 5.a.
@@ -3811,16 +3837,17 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +
 +from __future__ import annotations
 +
-+import os
 +
 +import torch
++
++import vllm.envs as envs
 +
 +from vllm.triton_utils import tl, triton
 +
 +# Number of KV-sequence splits for the split-K flash-decoding kernel. More
 +# splits = better load-balancing of ragged burst seqlens across SMs, at the cost
 +# of a larger fp32 partial-output scratch + more stage-2 combine work.
-+KVARN_NUM_KV_SPLITS = int(os.environ.get("KVARN_NUM_KV_SPLITS", "16"))
++KVARN_NUM_KV_SPLITS = int(envs.KVARN_NUM_KV_SPLITS or "16")
 +KVARN_MAX_KV_SPLITS = 64  # cap of the context-adaptive schedule below
 +
 +# Shared autotune space for the decode kernels (single-token, split-K stage1,
@@ -3853,7 +3880,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    a ~28% stage-1 win, growing at longer ctx (16K: 82->49us). Split-K is
 +    log-sum-exp-combined, so the count never changes the OUTPUT, only occupancy;
 +    32 is the floor up to 256 blocks. KVARN_NUM_KV_SPLITS overrides."""
-+    env = os.environ.get("KVARN_NUM_KV_SPLITS")
++    env = envs.KVARN_NUM_KV_SPLITS
 +    if env is not None:
 +        return int(env)
 +    if max_blocks_per_req <= 256:
@@ -4525,7 +4552,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    #   MATERIALIZE — build packed fp16 K/V then stock FlashAttention (≥2.25x
 +    #                FP16 KV traffic; kept for A/B and as a fallback).
 +    max_blocks_per_req = md.fa_max_blocks_per_req
-+    use_fused = os.environ.get("KVARN_FUSED_DECODE", "1") == "1"
++    use_fused = envs.KVARN_FUSED_DECODE
 +    # Both the single-stage kernel and stage1 are @triton.autotune'd over
 +    # BLOCK_N/num_warps (keyed on D/GROUP/Q_PER_KV/K_BITS/V_BITS) — no
 +    # BLOCK_N/num_warps/num_stages passed at the launch sites.
@@ -4566,7 +4593,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    # (defensive — real decode batches always fit, but a padded dummy run can
 +    # be wider). The single-stage kernel handles any batch size.
 +    _mid_fits = impl._mid_o_buf is not None and N <= impl._mid_o_buf.shape[0]
-+    _sk_env = os.environ.get("KVARN_SPLIT_K")
++    _sk_env = envs.KVARN_SPLIT_K
 +    if _sk_env is not None:
 +        split_k = use_fused and _sk_env == "1" and _mid_fits
 +    else:
@@ -4727,7 +4754,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +            # output) through a mechanism not yet isolated — suspicion is an
 +            # interaction with async scheduling / drafter metadata rather
 +            # than kernel math. Re-enable for debugging only.
-+            and os.environ.get("KVARN_SHARED_VERIFY", "0") == "1"):
++            and envs.KVARN_SHARED_VERIFY):
 +        # SHARED-DEQUANT uniform path: split-K shaped (SPLITS=1 degenerates
 +        # cleanly); stage2 combines into the flat [NQ*Hq, D] output.
 +        B = NQ // qlen
@@ -4771,7 +4798,7 @@ from its vLLM 0.23 fork onto the 0.28.0 this repo runs.
 +    # KVARN_SPLIT_K=1 is an explicit force-on; KVARN_SPLIT_K=0 does not disable
 +    # the correctness-required auto split.
 +    _sw = int(getattr(impl, "sliding_window", 0) or 0)
-+    _sk_env = os.environ.get("KVARN_SPLIT_K")
++    _sk_env = envs.KVARN_SPLIT_K
 +    auto_split = (_sw <= 0) and (max_ctx_blocks >= 16)
 +    split_k = auto_split or _sk_env == "1"
 +

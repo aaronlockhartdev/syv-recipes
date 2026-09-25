@@ -38,7 +38,7 @@ combination is new to the matrix).
 
 ## Invariants
 
-- **`patches/` is the synced set (35).** They apply in the order of
+- **`patches/` is the synced set (43).** They apply in the order of
   `patches/series` (the upstream file; later patches depend on files and
   hunk context created by earlier ones -- e.g. prefill-attn-int8 carries
   spec-decode-attn's lines as context), not in glob order.
@@ -69,14 +69,14 @@ combination is new to the matrix).
 - **The lookup/chain envs** (`VLLM_DFLASH2_LOOKUP`, `VLLM_DFLASH2_CHAIN`)
   exist in the patch set — both adopted in the
   0.28.0 sync, both off by default, enabled by `.env` only.
-- **DFlash2 is native in vLLM 0.28.0** (upstream PR #52816); the 0.27.1
+- **DFlash2 is native in vLLM 0.29.0 (since 0.28.0)** (upstream PR #52816); the 0.27.1
   `dflash2-backport` is retired. The `dflash2-*` patches extend the native
   implementation, and `dflash2-lookup-drafting` additionally carries the
   W4A16 draft-checkpoint support (packed-qkv dequant, quantized lm_head
   sharing) that serving this model needs — do not trim it on the
   assumption it is just an option.
 - **A speculative-config for a drafter must set `draft_sample_method`** (upstream
-  #73): on 0.28.0 the native speculator base allocates the draft-logits
+  #73): on 0.29.0 the native speculator base allocates the draft-logits
   buffer only when the config asks; without it the rejection test loses
   its denominator and acceptance drops ~16% (101.4 vs 121.7 tok/s
   upstream). All nine drafter recipes (the five dflash2, the dspark, and
@@ -89,7 +89,7 @@ combination is new to the matrix).
   (bf16, 7 drafts/step) is fetched in every setup (`setup.py`,
   `docker/prepare.sh`; `DSPARK=/path` redirects, `=0/false/no` skips). The
   fetch rewrites the checkpoint's config.json architecture to
-  Qwen3DSparkModel (0.28.0 maps the published name to the DeepSeek V4
+  Qwen3DSparkModel (0.29.0 maps the published name to the DeepSeek V4
   class), hard-links the weights, and copies the checkpoint's own
   dspark.py/dflash.py so the installed dir stays self-contained; an
   interrupted (partial) cache is completed, never treated as warm.
@@ -159,7 +159,7 @@ Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
 recipes/ the nine *.sh
 prepare/ build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, harden_chat_template.py, patch_vllm.py, _ui.py
-patches/ the 35 synced patches + patches/series (the apply order)
+patches/ the 43 synced patches + patches/series (the apply order)
 ```
 
 Defaults: venv `.venv/`, models under `models/`, port 8080, and `Qwen3.8-
@@ -178,7 +178,7 @@ does not merge main; sync is a manual diff:
    (measured numbers and gotchas), and `prepare/` scripts.
 3. Adopt relevant patches into `patches/` and launcher knowledge into the
    recipes; note upstream provenance + measured deltas in comments.
-4. Validate: the full set applies in order on a pristine Linux vllm 0.28.0
+4. Validate: the full set applies in order on a pristine Linux vllm 0.29.0
    and compiles — `prepare/patch_vllm.py` does exactly this and is
    re-run on every setup/serve.
 

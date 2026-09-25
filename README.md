@@ -2,7 +2,7 @@
 
 A fork of [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090),
 specialized to one machine shape: **two 24 GB GPUs (tensor-parallel 2)**,
-serving Qwen3.8-27B with vLLM 0.28.0 and its custom patch stack. Everything
+serving Qwen3.8-27B with vLLM 0.29.0 and its custom patch stack. Everything
 not needed for serving is removed; each recipe calls `vllm serve` with
 explicit flags — no CTX/SPEC-style configuration to construct.
 
@@ -20,8 +20,8 @@ explicit flags — no CTX/SPEC-style configuration to construct.
 
 The numbers in the notes below are upstream's, measured on their reference
 box; we have not benchmarked these recipes -- run them on your hardware
-before quoting a figure. Most predate the 0.28.0 rebase: upstream has not
-re-measured its 0.28.0 matrix yet (see Notes).
+before quoting a figure. Most predate the 0.29.0 re-baseline; upstream
+re-measured its 0.29.0 matrix on its own boxes (see Notes).
 
 All recipes take image input (no `--language-model-only`), with no
 image-count limit per request; each image is capped at 2097152 px =
@@ -79,12 +79,12 @@ on prefix-cache hits).
 ## Layout
 
 ```
-Dockerfile          uv + pinned vLLM 0.28.0 + every patch in patches/
+Dockerfile          uv + pinned vLLM 0.29.0 + every patch in patches/
 requirements.txt    the pinned set (vllm pulls torch 2.13 / flashinfer itself)
 setup.py            bare-metal one-shot: venv, deps, patches, model prep
 recipes/            the nine serve configurations
 prepare/            build_fast_model.py, fetch_dflash2.py, fetch_dspark.py, harden_chat_template.py, patch_vllm.py -- model prep + idempotent patching (runs standalone)
-patches/            the 35 vLLM patches (below)
+patches/            the 43 vLLM patches (below)
 docker/             entrypoint.sh, prepare.sh
 ```
 
@@ -150,6 +150,17 @@ MODEL=/data/qwen VENV=/data/qwen/.venv ./setup.py
 MODEL=/data/qwen bash recipes/w4a16-int8-dflash2.sh
 ```
 
+Bare-metal `nvcc`: 0.29 ships FlashInfer 0.6.18, whose JIT passes
+flags (`--compress-mode=size`) that nvcc older than 13 rejects, so the
+first boot that compiles a FlashInfer kernel dies with "nvcc fatal: Unknown
+option" on a system with an older toolchain. The venv already carries the
+CUDA 13 toolchain vLLM pulls in: point `CUDA_HOME` at
+`.venv/lib/python3.14/site-packages/nvidia/cu13` and re-run. The Docker
+image carries CUDA 13 and is untouched. On this stack the recipes'
+`VLLM_USE_FLASHINFER_SAMPLER=0` (extended to the drafter's top-k by
+`topk-honour-flashinfer-sampler-switch.patch`) keeps the most likely JIT
+trigger off; set the variable explicitly to override.
+
 The same overrides can live in a `.env` file at the repo root instead:
 every recipe and both `setup.py` and `patch_vllm.py` read it, but only for
 a variable that is unset or empty in the real environment, which always
@@ -188,67 +199,81 @@ The recipes put the venv's `bin` on PATH (`VENV`, defaulting to `.venv`) and
 default to port 8080; `MODEL`, `DRAFT` and `PORT` may be overridden with
 env vars of the same names.
 
-## The kept patches (all apply to vLLM 0.28.0)
+## The kept patches (all apply to vLLM 0.29.0)
 
 DFlash2 itself is native in vLLM 0.28.0 (upstream PR #52816) — the 0.27.1
 `dflash2-backport` is retired and no longer applied. The `dflash2-*`
 patches below extend the native implementation instead.
 
-This set is upstream's 2026-09 regeneration (PR #119): every patch is the
-verbatim file upstream exported from its pinned fork commits, with the
-syv env knobs registered in `vllm/envs.py` (so they enter the
-torch.compile cache key), and the apply order is `patches/series` — not
-glob order, because a few patches carry hunk context an earlier patch adds
-(upstream's CI applies the series fuzz-0 against the pinned vLLM).
+This set is upstream's vLLM 0.29.0 re-export (PR #148): every patch is
+the verbatim file upstream re-cut against the 0.29.0 tree, the whole series
+applying at `--fuzz 0`, with the syv env knobs registered in `vllm/envs.py`
+(so they enter the torch.compile cache key), and the apply order is
+`patches/series` — not glob order, because a few patches carry hunk context
+an earlier patch adds. `VLLM_V2_CUDAGRAPH_MEM_MIB` is dead on 0.29 (it
+profiles CUDA-graph memory itself), so the recipes no longer export it.
 
-- `dflash2-lookup-drafting.patch` — lookup-augmented drafting (`VLLM_DFLASH2_LOOKUP=1`, off by default): propose continuations of earlier occurrences of the current suffix; on 0.28.0 it also carries the W4A16 draft-checkpoint support (packed-qkv dequant, quantized lm_head sharing) that native DFlash2 needs for this model
+- `auth-deny-default.patch` — with `--api-key` set, deny by default: every path except the liveness ones requires the key (upstream #169; the old guard authenticated only `/v1`, `/v2`, `/inference` and `/cohere`); our recipes set no key, so it bites only via EXTRA_ARGS
+- `compile-key-runtime-knobs.patch` — keeps this repo's runtime-only env knobs out of the torch.compile cache key (a flip no longer spawns a second compile cache)
+- `cudagraph-memory-from-allocator.patch` — measures captured CUDA-graph memory by the allocator's reserved bytes instead of the driver's free-memory delta (which collapses under WSL2 and over-reserves the KV budget on a cold cache)
+- `dflash2-lookup-drafting.patch` — lookup-augmented drafting (`VLLM_DFLASH2_LOOKUP=1`, off by default): propose continuations of earlier occurrences of the current suffix; on 0.29.0 it also carries the W4A16 draft-checkpoint support (packed-qkv dequant, quantized lm_head sharing) that native DFlash2 needs for this model
 - `dflash2-ngram-chains.patch` — drafter-free n-gram chains on top of lookup (`VLLM_DFLASH2_CHAIN=1`, off by default, greedy by default): while a request keeps reproducing its own context, whole verify blocks come from history and the drafter's forward and graph replay are skipped (upstream #38, ported from Dmtrii-tesla's fork)
 - `dflash2-prewarm.patch` — pre-compiles the `_prepare_dflash_inputs_kernel` Triton variants at boot, so the first large prefill never JIT-compiles mid-request (#48)
-- `dflash2-z-adaptive-emitted.patch` — fixes the emitted-token accounting the lookup's adaptive block-length choice reads (upstream's 2026-09 re-cut replaces the old comment that contradicted the fix: `num_sampled` is the count the sampler emitted, and `num_rejected` is defined relative to it)
-- `dspark-draft-quant-config.patch` — lets a bf16 DSpark drafter load beside the quantized target: the loader asked for the draft's quantization config through the target's hf_overrides as a callable, which `get_quant_config` refuses — return None when the draft carries none of its own (upstream #84 / issue #25 item 15, validated on 0.28.0; the w4a16-int8-dspark recipe)
-- `hybrid-kv-groups-v2-cudagraph.patch` — KV-group sizing for the drafter's sliding-window layers; explicit CUDA-graph memory accounting (`VLLM_V2_CUDAGRAPH_MEM_MIB`)
+- `dflash2-z-adaptive-emitted.patch` — fixes the emitted-token accounting the lookup's adaptive block-length choice reads (`num_sampled` is the count the sampler emitted, and `num_rejected` is defined relative to it)
+- `dspark-draft-quant-config.patch` — lets a bf16 DSpark drafter load beside the quantized target: the loader asked for the draft's quantization config through the target's hf_overrides as a callable, which `get_quant_config` refuses — return None when the draft carries none of its own (upstream #84 / issue #25 item 15; the w4a16-int8-dspark recipe)
+- `engine-completion-log.patch` — one INFO line per request that leaves the scheduler finished (vLLM logs nothing on completion; held out of this repo in the 0.28.0 sync as upstream-harness observability, adopted with the 0.29 re-export)
+- `engine-stall-sentinel.patch` — warns when the engine core stops completing steps while requests are live (the silent-stall class of upstream #107); off by default (`VLLM_ENGINE_STALL_SENTINEL_S`)
+- `hybrid-kv-groups-v2-cudagraph.patch` — KV-group sizing for the drafter's sliding-window layers (the 0.29 re-export retired its graph-reserve hunk: 0.29 profiles graph memory itself)
 - `hybrid-sw-block-promote.patch` — lets a quantized KV cache fit in a hybrid target+drafter (block-size promotion instead of page padding)
-- `int4-kv-per-token-head.patch` — boot blockers for int4 per-token-head KV with the drafter
-- `int4-mq3d-envs.patch` — registers `VLLM_INT4_MQ_3D` / `VLLM_INT4_MQ_3D_DEBUG` in `vllm/envs.py` (the 3D dispatch the w4a16-int4-dflash2 and w4a16-int4-mtp recipes enable; new in this sync's regeneration)
-- `kvarn-0.28.0.patch` — the KVarN (Huawei CSL) dense KV-cache backend wiring for 0.28.0: the `kvarn_*` cache-dtype literals, `KVQuantMode.KVARN`, the backend registry + CUDA priority list, the packed-tile KV-cache spec, and the fp16 tail-pool `max_num_seqs` cap (upstream kvarn/)
-- `kvarn-files-0.28.0.patch` — the KVarN backend modules themselves (quantization config, Triton kernels, `KVarNAttentionBackend`), upstream's port of KVarN's vLLM 0.23 fork onto 0.28.0, create-only (the w4a16-k4v2-dflash2 recipe)
-- `kvarn-v2-runner-0.28.0.patch` — the V2-runner, sliding-cache and DFlash2 correctness fixes the KVarN lane needs; applied after the base port, cut against a tree carrying `mamba-align-retire-null-gaps` (upstream kvarn/)
+- `int4-kv-per-token-head.patch` — boot blockers for int4 per-token-head KV with the drafter (the 0.29 re-export dropped its padded-page-view hunk: 0.29's layout strides cover it)
+- `kvarn-0.29.0.patch` — the KVarN (Huawei CSL) dense KV-cache backend wiring for 0.29.0: the `kvarn_*` cache-dtype literals, `KVQuantMode.KVARN`, the backend registry + CUDA priority list, the packed-tile KV-cache spec, and the fp16 tail-pool `max_num_seqs` cap (upstream kvarn/)
+- `kvarn-files-0.29.0.patch` — the KVarN backend modules themselves (quantization config, Triton kernels, `KVarNAttentionBackend`), upstream's port of KVarN's vLLM 0.23 fork onto 0.29.0, create-only (the w4a16-k4v2-dflash2 recipe)
+- `kvarn-v2-runner-0.29.0.patch` — the V2-runner, sliding-cache and DFlash2 correctness fixes the KVarN lane needs; applied after the base port, cut against a tree carrying the whole series (upstream kvarn/)
+- `marlin-int8-asym-zp.patch` — the Marlin int8-activation path (`VLLM_MARLIN_INPUT_DTYPE=int8`) accepts zero-point (asymmetric AWQ) int4 bodies (#172)
 - `marlin-int8-layer-select.patch` -- env-selectable int8-activation layers for the Marlin path (the w4a8-int8-dflash2 recipe)
 - `marlin-int8-negative-scales.patch` — correctness fix for negative group scales in W4A8
 - `marlin-repack-staged-sm80.patch` — staged Marlin repack (load-time allocation hygiene; the header records #27's corrected history — the old "VMM churn" theory was disproven)
 - `marlin-tune-table.patch` — routes `marlin_gemm` through a locally built tunable Marlin extension (`VLLM_MARLIN_TUNE=1`, a no-op without that build): +3-7% on the M≤16 decode/verify GEMMs, +2-20% on W4A8 chunked-prefill GEMMs
 - `mamba-align-checkpoint-order.patch` — retention of the mamba state snapshots a conversation's prefix-cache hits resume from; fixes the ~1-in-4-5-turn TTFT spikes (upstream #52 / vllm#45238). Ships default off; all nine recipes default it on (`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`)
-- `mamba-align-retire-null-gaps.patch` — retires mamba align-mode state blocks across null gaps instead of holding them until the request ends (upstream backport of vllm#55450): a 480k-token prefill leaves 71 retained state blocks per Mamba group where 8-9 is the bound — peak pool pressure exactly where the k4v2 lane runs. The 0.28.0 sync left it pending a 3090 A/B against our `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` default (both touch the align-snapshot free path); it is adopted with the KVarN lane, which the v2-runner patch was cut against, and upstream #101 measured it inert on the dflash2 profile
+- `mamba-align-retire-null-gaps.patch` — retires mamba align-mode state blocks across null gaps instead of holding them until the request ends (upstream backport of vllm#55450): a 480k-token prefill leaves 71 retained state blocks per Mamba group where 8-9 is the bound — peak pool pressure exactly where the k4v2 lane runs; adopted with the KVarN lane, which the v2-runner patch was cut against, and upstream #101 measured it inert on the dflash2 profile
 - `mamba-chunked-prefill-align.patch` — correctness fix: GDN/Mamba state loss and NaN during chunked prefill (the state-copy source column, and an uninitialized-memory mask in the flash-linear-attention chunk-o kernel)
+- `memory-profile-after-warmup.patch` — runs the profiling forward pass once before the measured one and releases the allocator's cached blocks between them, so a cold compile cache does not land torch.compile and Triton JIT scratch inside the profiling window (on 0.29's fresh-cache boots the peak read ~1 GiB high and the KV check refused the boot)
 - `offload-dflash-eagle-groups.patch` — OffloadingConnector group flagging under dflash
 - `prefill-attn-int8.patch` — int8-QK Triton prefill attention for the head_dim-256 layers (`VLLM_PREFILL_ATTN=int8`; bf16 KV, single-request prefill chunks only, off by default; 1.27-1.35x on the kernel vs FA2). Upstream's name: this file was `triton-prefill-attn-int8` in our 0.28.0 sync and carries the upstream name since the regeneration
 - `qwen3_5-embed-quant.patch` — route the embedding table through the quantized path (the fast model needs it)
 - `qwen3_5-mtp-draft-vocab.patch` — vocab-truncated MTP draft head (the fast model's 40k draft head)
 - `sampler-small-topk-fast-softmax.patch` — sort-free top-k/top-p, multi-block softmax, truncated drafts
+- `serve-404-served-names.patch` — the model-not-found 404 now lists the served names (upstream #166)
+- `serve-model-path-match.patch` — accept the model path `/v1/models` itself advertises, not just the served name (upstream #167)
 - `spec-decode-attn.patch` — split-KV verify attention (`VLLM_SPEC_DECODE_ATTN`), bf16 path
 - `spec-decode-int4-kv-mq3d.patch` — multi-query 3D dispatch for the int4-KV verify (`VLLM_INT4_MQ_3D`; both int4 recipes)
 - `spec-decode-int8-kv.patch` — teaches the split-KV kernel to read the int8 per-token-head cache
 - `spec-decode-scratch-token-units.patch` — sizes the int4-3D softmax scratch buffers in query tokens, not sequences (the #46 gate campaign: 9-16-token verify batches had been falling back to 2D silently)
 - `spec-decode-scratch-within-budget.patch` — allocates those buffers inside the memory profile, so the reported KV budget is honest (#57 merge review)
 - `spec-sampler-prewarm.patch` — compiles the rejection sampler's Triton kernels at boot with a spec-shaped dummy verify, so the first draft-verifying request never JITs mid-request (#48)
-- `speed-knobs-envs.patch` — registers the speed knobs as env vars (torch.compile cache key)
+- `speed-knobs-envs.patch` — registers the speed knobs as env vars (torch.compile cache key), including `VLLM_INT4_MQ_3D` (absorbed from the retired `int4-mq3d-envs.patch`)
+- `tokenize-v1-route.patch` — `/tokenize` and `/detokenize` under `/v1` as well as at the root (OpenAI-SDK-style base URLs, upstream #168)
+- `topk-honour-flashinfer-sampler-switch.patch` — `VLLM_USE_FLASHINFER_SAMPLER=0` now also covers the drafter's candidate top-k: on 0.29's FlashInfer 0.6.18 that call JITs a kernel only nvcc >= 13 can build, so without the honour the dflash2 recipes die at boot on older toolchains
 - `vision-tower-cpu-offload.patch` — vision tower in pinned host RAM (`VLLM_VISION_CPU_OFFLOAD_GB`)
 - `vllm-pr50021-gdn-spec-bounds.patch` — bounds on accepted-token state lookups in the GDN/Mamba spec kernels
-- `vllm-pr54282-draft-gumbel-salt.patch` — vLLM #54282: the Gumbel noise that re-samples a rejected draft token was correlated with the noise that produced it, biasing acceptance toward the drafter; salts the draft's stream (1<<30) so the two are independent (upstream backport; the dflash2 hunk ported by hand)
-- `xgrammar-spec-terminated.patch` — structured output survives tokens accepted past the grammar's end
-
 Removed from the upstream stack: the whole WSL2 lane (out of scope, incl.
 `offload-wsl2-devptr.patch`), `offload-mtp-serve.patch` (CPU KV tier under
 MTP; our recipes run no connector — upstream measured 96 -> 102 tok/s at
-CTX=long with it), `engine-completion-log.patch`, `engine-stall-sentinel.patch`,
-`sse-keep-alive.patch` (their harness/observability) and
+CTX=long with it), `bench-probe-errors.patch` (their harness) and
 `triton-spec-attn-fp8-kv.patch` (sm89+; our 3090s are sm86, and fp8 KV is
-excluded here). KVarN was dropped with the WSL2 lane at the fork and is back
-in the set with the k4v2 recipes (adopted on request; its V2-runner port and
-the retire-null-gaps fix its patch set was cut against are in too).
-Lookup-augmented drafting and n-gram chains are in the set (both off by
-default). `int4-mq3d-envs.patch` (skipped in the 0.28.0 sync, when the int4
-lane read os.environ directly) is in the set again with the regeneration.
+excluded here). The 0.29.0 re-export retired the rest:
+`vllm-pr54282-draft-gumbel-salt` and `xgrammar-spec-terminated` (both in
+0.29.0), `int4-mq3d-envs` (absorbed into `speed-knobs-envs`), the
+graph-memory-reserve hunk of `hybrid-kv-groups-v2-cudagraph` and the
+padded-page-view hunk of `int4-kv-per-token-head` (0.29 covers them
+natively), and `sse-keep-alive` (no longer in upstream's series).
+`engine-completion-log` and `engine-stall-sentinel` were held out of this
+repo in the 0.28.0 sync as upstream-harness observability; the 0.29 re-export
+adopts them (the stall sentinel ships off by default). KVarN was dropped
+with the WSL2 lane at the fork and is back in the set with the k4v2 recipes
+(adopted on request), re-ported onto 0.29.0 — the three `kvarn-*` files
+mirror upstream's kvarn/ install order. Lookup-augmented drafting and
+n-gram chains are in the set (both off by default).
 
 ## Notes
 
@@ -320,15 +345,27 @@ lane read os.environ directly) is in the set again with the regeneration.
   way (memory-bound).
 - **MTP + split-KV verify**: a configuration upstream never measured (see
   the w4a16-int8-mtp header); check draft acceptance on your workload.
-- **The 0.28.0 rebase** (this sync): DFlash2 went native, the old
-  backport is retired, and the set above all apply to 0.28.0 (three
-  patches keep upstream's older "written against 0.27.1" stamp — they
-  apply cleanly to the 0.28.0 tree).
-  Upstream has not re-measured its 0.28.0 matrix; the upstream numbers
-  quoted in these notes are the 0.27.1 stack's. The one measured delta is
-  the #73 fix below: 0.28.0 with `draft_sample_method` reads 3.23 tok/step
-  / 121.7 tok/s against 0.27.1's 3.19 / 120.5 (reference 3090, CTX=fast =
-  bf16 KV, k=15) — at or above the old base.
+- **The 0.29.0 re-baseline** (this sync, upstream PR #148): the whole
+  set above is upstream's re-export against the vLLM 0.29.0 tree, every
+  hunk applying at `--fuzz 0`. 0.29 itself carries what four of our
+  files/hunks used to add (`vllm-pr54282-draft-gumbel-salt`,
+  `xgrammar-spec-terminated`, the graph-memory reserve of
+  `hybrid-kv-groups-v2-cudagraph`, the padded-page view of
+  `int4-kv-per-token-head`), so they are gone; `VLLM_INT4_MQ_3D` moved into
+  `speed-knobs-envs` and the int4 recipes keep working; `VLLM_V2_CUDAGRAPH_MEM_MIB`
+  is dead and no recipe exports it any more. The new memory pair
+  (`memory-profile-after-warmup` + `cudagraph-memory-from-allocator`)
+  repairs 0.29's cold-cache profiling: on a fresh compile cache the
+  profiler's peak read ~1 GiB high and its graph-memory estimate up to
+  5.44 GiB against a 0.23 GiB real pool, refusing boots that pass warm.
+  Upstream re-measured its 0.29.0 matrix on its own boxes (not ours):
+  decode +7..+17% per profile at C1-C8, perplexity and GSM8K identical to
+  0.28, the fast-profile KV pool up 66,692 -> 77,872 tokens, the KVarN
+  huge-context pool 221,238 -> 281,415, needle retrieval intact at
+  32k/90k/200k (upstream docs/vllm-0.29.md). Adopted here by decision:
+  `auth-deny-default` (upstream #169) — with `--api-key` set, every path
+  except the liveness ones now requires the key; our recipes set no key, so
+  it bites only when one is added via EXTRA_ARGS.
 - **Upstream sync 1834917..bae2023**: adopted the #86 int64 cast in
   `spec-decode-attn.patch` (verbatim) and the prefill patch (then kept as
   `triton-prefill-attn-int8.patch`; this sync takes upstream's name,
@@ -362,7 +399,7 @@ lane read os.environ directly) is in the set again with the regeneration.
   (gotchas content unchanged); the `upstream` remote still names the old
   repo, which GitHub redirects. Their verify.sh / quant_heads_stream fixes
   target their own harness/scripts, not adopted.
-- **`draft_sample_method` is required on 0.28.0** (upstream #73): the
+- **`draft_sample_method` is required on 0.29.0** (upstream #73): the
   native speculator base allocates the draft-logits buffer only when the
   speculative config asks for it; without it the rejection test loses its
   denominator and acceptance drops ~16%. The dflash2 recipes set it
@@ -377,7 +414,7 @@ lane read os.environ directly) is in the set again with the regeneration.
   tok/s), flat on prose. Both were measured upstream on a single card;
   lookup is untested on TP=2 — check acceptance and output before relying
   on it (drop either into `.env` to try).
-- **DSpark drafter (w4a16-int8-dspark, fetched in every setup)**: vLLM 0.28.0 has a native
+- **DSpark drafter (w4a16-int8-dspark, fetched in every setup)**: vLLM 0.29.0 has a native
   `dspark` speculative method, and the community checkpoint
   (RadixArk/Qwen3.8-27B-DSpark, bf16, 1.86 B params / ~3.7 GB, 7 drafts per
   step) serves on our int8-KV stack once you dodge two traps -- both handled

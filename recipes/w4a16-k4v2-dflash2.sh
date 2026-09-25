@@ -4,7 +4,7 @@
 # 262k.
 #
 # KVarN (Huawei CSL, Apache-2.0) is a native vLLM attention backend ported
-# onto the 0.28.0 this repo runs: Hadamard rotation + iterative variance
+# onto the 0.29.0 this repo runs: Hadamard rotation + iterative variance
 # normalization + 4/2-bit RTN per 128-token tile, ~840 B/token/layer
 # (fp8: 2048 B) -- roughly half the int4 per-token-head cache, so the same
 # VRAM holds the full 262,144-token context the model declares. Upstream
@@ -15,11 +15,11 @@
 # docs/long-context.md; their MTP single-user lane -- this recipe's
 # dflash2 drafter reads and writes the same cache).
 #
-# It needs three patches (in build order): patches/kvarn-0.28.0.patch
+# It needs three patches (in build order): patches/kvarn-0.29.0.patch
 # (the vLLM wiring: cache-dtype literals, KVQuantMode.KVARN, the backend
 # registry + CUDA priority list, the KV-cache-spec branch, the tail-pool
-# max_num_seqs cap), patches/kvarn-files-0.28.0.patch (the backend
-# modules themselves) and patches/kvarn-v2-runner-0.28.0.patch (the V2
+# max_num_seqs cap), patches/kvarn-files-0.29.0.patch (the backend
+# modules themselves) and patches/kvarn-v2-runner-0.29.0.patch (the V2
 # runner, sliding-cache and DFlash2 correctness fixes). All are in the
 # set prepare/patch_vllm.py applies (and the Docker build applies the
 # same way); there is no separate install step.
@@ -34,6 +34,11 @@
 #     the pool (upstream single-user launcher). The k4v2 analogue of the
 #     int4 recipe's 848.
 #
+# --prefix-cache-retention-interval 13056: at 7 drafts the attention block
+# is 2176 tokens, and vLLM's default dense retention means two long
+# conversations advanced in turn evict each other's mamba snapshots (0%
+# prefix reuse, a full re-prefill every turn); one in six (6 x 2176) keeps
+# 93-99.5% (upstream #174, single 3090 -- their measurement, not ours).
 # The split-KV verify attention (VLLM_SPEC_DECODE_ATTN) reads bf16/int8
 # caches only, so it is off here: the KVarN backend brings its own
 # dequant verify path (upstream: KVARN_FUSED_VERIFY, on by default).
@@ -132,10 +137,6 @@ export VLLM_SPEC_DECODE_ATTN=0
 # budgeted as a share of the post-weight VRAM envelope: 0.15 is the
 # upstream single-user huge default (their batch lane uses 0.25)
 export KVARN_POOL_MEM_FRAC=${KVARN_POOL_MEM_FRAC:-0.15}
-# the V2 runner (forced by dflash) doesn't count its ~1.4 GiB of CUDA graphs
-# against gpu-memory-utilization, so they're reserved here
-# (patches/hybrid-kv-groups-v2-cudagraph.patch)
-export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
 # vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
 # off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
@@ -147,17 +148,17 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 # off -- we default it on (deviation); retention is bounded (<=3 blocks per
 # request per group). Set VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=0 to opt out.
 export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=${VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS:-1}
-# keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# at TP=2 custom all-reduce exports its graph buffers over CUDA IPC and an expandable (VMM) segment has none to export, so default the allocator plain (upstream #163/#176; set the variable to override)
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
 
 # no --language-model-only: the server takes image input.
 # Vision: image count is unlimited; each image is capped at 2097152 px
 # = 2048 tokens, and that cap sets the encoder's profiled peak in the
 # KV pool (at most the 4096-token encoder budget). xxhash: faster
 # prefix-cache hashes than sha256. No --attention-backend: the kvarn_k4v2
-# cache dtype selects the KVarN backend itself (the kvarn-0.28.0 patch
+# cache dtype selects the KVarN backend itself (the kvarn-0.29.0 patch
 # registers it in the CUDA priority list, like TurboQuant).
-# draft_sample_method is required on 0.28.0: the native DFlash2 inherits the
+# draft_sample_method is required on 0.29.0: the native DFlash2 inherits the
 # upstream speculator base, which allocates the draft-logits buffer only when
 # the config asks; without it the rejection test loses its denominator and
 # acceptance drops ~16% (upstream #73).
@@ -177,6 +178,7 @@ exec vllm serve "$MODEL" \
   --enable-prefix-caching \
   --prefix-caching-hash-algo xxhash \
   --prefix-match-unit 128 \
+  --prefix-cache-retention-interval 13056 \
   --mamba-cache-mode align \
   --mm-processor-kwargs '{"size":{"shortest_edge":65536,"longest_edge":2097152}}' \
   --speculative-config '{"method":"dflash","model":"'"$DRAFT"'","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}' \

@@ -11,9 +11,7 @@
 #      the block is long, for the graphs); max_cudagraph_capture_size goes
 #      32 -> 64 with it, the launcher's own formula at 8 slots (8 x the
 #      8-token verify block) -- at 32 an 8-request decode batch would run
-#      piecewise, ~8% slower (upstream's CTX=fast note). The
-#      VLLM_V2_CUDAGRAPH_MEM_MIB reservation stays 1400: upstream sizes it
-#      identically at k<=7 for 4 and 8 slots (1900 only above 7 drafts).
+#      piecewise, ~8% slower (upstream's CTX=fast note).
 #   2. --max-num-batched-tokens 8192 (upstream ships 2048). Its batch lane
 #      measured 2048 beating 8192: bigger chunks inflate the profiled
 #      activation peak, which shrinks the KV/state page pool. We accept the
@@ -84,10 +82,6 @@ fi
 # (patches/spec-decode-attn.patch + spec-decode-int8-kv.patch); QMAX = the 8-token verify block
 export VLLM_SPEC_DECODE_ATTN=1
 export VLLM_SPEC_DECODE_ATTN_QMAX=8
-# the V2 runner (forced by dflash) doesn't count its ~1.4 GiB of CUDA graphs
-# against gpu-memory-utilization, so they're reserved here
-# (patches/hybrid-kv-groups-v2-cudagraph.patch)
-export VLLM_V2_CUDAGRAPH_MEM_MIB=1400
 # vision tower in pinned host RAM by default (upstream default; patches/vision-tower-cpu-offload.patch):
 # off the VRAM budget, bit-exact, ~+12% per image forward; =0 keeps it GPU-resident
 export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
@@ -99,15 +93,15 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 # off -- we default it on (deviation); retention is bounded (<=3 blocks per
 # request per group). Set VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=0 to opt out.
 export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=${VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS:-1}
-# keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# at TP=2 custom all-reduce exports its graph buffers over CUDA IPC and an expandable (VMM) segment has none to export, so default the allocator plain (upstream #163/#176; set the variable to override)
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
 
 # no --language-model-only: the server takes image input.
 # Vision: image count is unlimited; each image is capped at 2097152 px
 # = 2048 tokens, and that cap sets the encoder's profiled peak in the
 # KV pool (at most the 4096-token encoder budget). xxhash: faster
 # prefix-cache hashes than sha256.
-# draft_sample_method is required on 0.28.0: the native DFlash2 inherits the
+# draft_sample_method is required on 0.29.0: the native DFlash2 inherits the
 # upstream speculator base, which allocates the draft-logits buffer only when
 # the config asks; without it the rejection test loses its denominator and
 # acceptance drops ~16% (upstream #73).

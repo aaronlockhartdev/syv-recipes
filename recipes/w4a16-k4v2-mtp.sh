@@ -4,7 +4,7 @@
 # full 262,144-token context, 8 seats for the 4-8 concurrent range.
 #
 # KVarN (Huawei CSL, Apache-2.0) is a native vLLM attention backend ported
-# onto the 0.28.0 this repo runs: Hadamard rotation + iterative variance
+# onto the 0.29.0 this repo runs: Hadamard rotation + iterative variance
 # normalization + 4/2-bit RTN per 128-token tile, ~840 B/token/layer
 # (fp8: 2048 B) -- roughly half the int4 per-token-head cache, so the same
 # VRAM holds the full 262,144-token context the model declares. Upstream
@@ -17,8 +17,7 @@
 # The lane is the upstream single-user launcher's CTX=huge SPEC=mtp profile:
 # 3 drafts (its huge default; from C4 up, rejected drafts cost more as the
 # verify batch grows, and 3 is ahead of 4) on the KVarN cache. MTP runs on
-# the V1 runner, so the dflash2-only V2 graph accounting
-# (VLLM_V2_CUDAGRAPH_MEM_MIB) does not apply here.
+# the V1 runner.
 #
 # Three flags are not optional here:
 #   --block-size 128: the KVarN tile IS the block (its variance
@@ -148,17 +147,17 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 # off -- we default it on (deviation); retention is bounded (<=3 blocks per
 # request per group). Set VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=0 to opt out.
 export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=${VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS:-1}
-# keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# at TP=2 custom all-reduce exports its graph buffers over CUDA IPC and an expandable (VMM) segment has none to export, so default the allocator plain (upstream #163/#176; set the variable to override)
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
 
 # no --language-model-only: the server takes image input.
 # Vision: image count is unlimited; each image is capped at 2097152 px
 # = 2048 tokens, and that cap sets the encoder's profiled peak in the
 # KV pool (at most the 4096-token encoder budget). xxhash: faster
 # prefix-cache hashes than sha256. No --attention-backend: the kvarn_k4v2
-# cache dtype selects the KVarN backend itself (the kvarn-0.28.0 patch
+# cache dtype selects the KVarN backend itself (the kvarn-0.29.0 patch
 # registers it in the CUDA priority list, like TurboQuant).
-# draft_sample_method is required on 0.28.0 (upstream #73): without it
+# draft_sample_method is required on 0.29.0 (upstream #73): without it
 # the rejection test loses its denominator and acceptance drops ~16%.
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \

@@ -36,7 +36,7 @@
 #   in 128 returns "" / "#" or fluent wrong text. Upstream forced
 #   PIECEWISE for MTP for correctness; at the served lengths it costs
 #   nothing measured.
-#   draft_sample_method=probabilistic: required on 0.28.0 (upstream #73);
+#   draft_sample_method=probabilistic: required on 0.29.0 (upstream #73);
 #   without it the rejection test loses its denominator and acceptance
 #   drops ~16%.
 #
@@ -119,8 +119,8 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 # off -- we default it on (deviation); retention is bounded (<=3 blocks per
 # request per group). Set VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=0 to opt out.
 export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=${VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS:-1}
-# keep DeltaNet's transient workspace from fragmenting the allocator (boot OOM)
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# at TP=2 custom all-reduce exports its graph buffers over CUDA IPC and an expandable (VMM) segment has none to export, so default the allocator plain (upstream #163/#176; set the variable to override)
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
 
 # no --language-model-only: the server takes image input.
 # Vision: image count is unlimited; each image is capped at 2097152 px

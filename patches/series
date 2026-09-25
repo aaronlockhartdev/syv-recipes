@@ -5,15 +5,15 @@
 # prefill-attn-int8.patch inserts before spec-decode-attn.patch's split-KV
 # block and carries its lines as context), so order is a hard requirement.
 #
-#   - the entries are upstream's series (the upstream/synced commit) minus
-#     the seven files for lanes this repo does not ship: dflash2-backport
-#     (retired, DFlash2 is native in 0.28.0), offload-wsl2-devptr and
-#     offload-mtp-serve (WSL2 / single-user offload), engine-completion-
-#     log, engine-stall-sentinel, sse-keep-alive (their harness), and
-#     triton-spec-attn-fp8-kv (fp8 KV is excluded here)
-#   - the three kvarn patches close the series, after the main set, the way
-#     upstream's Dockerfile applies them after its series: kvarn-v2-runner
-#     needs the KVarN base and the DFlash2 patches beneath it
+#   - the entries are upstream's 0.29 series (the upstream/synced commit)
+#     minus the five files for lanes this repo does not ship: dflash2-
+#     backport (retired, DFlash2 is native since 0.28.0), offload-wsl2-
+#     devptr and offload-mtp-serve (WSL2 / single-user offload), bench-
+#     probe-errors (their harness), and triton-spec-attn-fp8-kv (fp8 KV
+#     is excluded here)
+#   - the three kvarn patches close the series, after the main set, in
+#     upstream's kvarn/install.sh order: kvarn-v2-runner needs the KVarN
+#     base beneath it
 #
 qwen3_5-embed-quant.patch
 marlin-int8-layer-select.patch
@@ -27,7 +27,6 @@ hybrid-kv-groups-v2-cudagraph.patch
 dflash2-lookup-drafting.patch
 hybrid-sw-block-promote.patch
 spec-decode-int8-kv.patch
-xgrammar-spec-terminated.patch
 vision-tower-cpu-offload.patch
 int4-kv-per-token-head.patch
 marlin-repack-staged-sm80.patch
@@ -44,9 +43,18 @@ mamba-chunked-prefill-align.patch
 spec-decode-scratch-within-budget.patch
 dflash2-z-adaptive-emitted.patch
 dspark-draft-quant-config.patch
-vllm-pr54282-draft-gumbel-salt.patch
 mamba-align-retire-null-gaps.patch
-int4-mq3d-envs.patch
-kvarn-0.28.0.patch
-kvarn-files-0.28.0.patch
-kvarn-v2-runner-0.28.0.patch
+engine-completion-log.patch
+engine-stall-sentinel.patch
+topk-honour-flashinfer-sampler-switch.patch
+memory-profile-after-warmup.patch
+cudagraph-memory-from-allocator.patch
+serve-404-served-names.patch
+serve-model-path-match.patch
+tokenize-v1-route.patch
+marlin-int8-asym-zp.patch
+compile-key-runtime-knobs.patch
+auth-deny-default.patch
+kvarn-0.29.0.patch
+kvarn-files-0.29.0.patch
+kvarn-v2-runner-0.29.0.patch
