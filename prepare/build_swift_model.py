@@ -1,20 +1,38 @@
 #!/usr/bin/env python3
-"""Build the modified Swift-Qwen3.8-27B W4A16 model into a destination dir.
+"""Build the modified Swift 1.5 Qwen3.8-27B W4A16 model into a destination dir.
 
 Assembled on the CPU from one Hub repo, fetched through Hugging Face's
 built-in cache (so re-runs never re-download):
 
-  jamesbrunet/Swift-Qwen3.8-27b-W4A16-AutoRound
-      the W4A16 AutoRound quant of ukisai/Swift-Qwen3.8-27b (a reasoning-
-      efficient fine-tune of Qwen3.8-27B, ~58% fewer thinking tokens at
-      <1% accuracy cost on ukisai's benches). As published: 4-bit Linear
-      layers (group-128, symmetric, compressed-tensors pack-quantized),
-      bf16 lm_head / embed_tokens / MTP module, ~20 GB over 67 shards.
-      Distributed under UkisAI's Swift Open License v1.0 (restrictive
-      terms) -- fetched and built here, never committed.
+  ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound
+      ukisai's own W4A16 AutoRound quant of Swift 1.5, their
+      reasoning-efficiency fine-tune of Qwen3.8-27B: 58.5% fewer thinking
+      tokens, +0.35% vs the base, 9.18x speed-up on ukisai's benches. As
+      published: 4-bit symmetric group-128 linears (a native AutoRound
+      export, GPTQ-style packed), bf16 lm_head / embed_tokens / MTP module,
+      ~19.6 GB over 5 shards + one extra-tensors file. The repo is GATED:
+      the download needs the account's HF_TOKEN plus a one-time acceptance
+      of UkisAI's Swift Open License v1.0 (restrictive terms) on the HF
+      page -- the dir is fetched and built here, never committed.
 
-The local steps are the same operations the fast variant applies to the
-base model (upstream's prepare/quant_lm_head.py, quant_embed.py,
+The published quant is not loadable by vLLM (quant_method 'auto-round'),
+so the first local step is a format conversion, run on the assembled dir
+before the requants:
+
+  0. every quantized linear: qweight (GPTQ-packed [in/8, out]) ->
+                 weight_packed ([out, in/8]; a plain transpose of the
+                 packed ints), scales -> weight_scale (transpose, fp16),
+                 qzeros dropped after verifying every element is the
+                 all-midpoint pack 0x88888888 (the symmetric shape -- any
+                 other value is an asymmetric zero-point this build cannot
+                 represent), weight_shape added
+                 config.json's quantization_config is rewritten to the
+                 compressed-tensors pack-quantized shape (the old repo's
+                 proven group_0; ignore = the bf16 linears: every visual
+                 linear and the linear-attention in_proj_a/b)
+
+The remaining steps are the same operations the fast variant applies to
+the base model (upstream's prepare/quant_lm_head.py, quant_embed.py,
 quant_mtp.py), in the plain round-to-nearest flavor:
 
   1. lm_head      bf16 -> int8 group-128 (~1.3 GB freed; fp16 scales,
@@ -31,7 +49,14 @@ quant_mtp.py), in the plain round-to-nearest flavor:
      as a whole, not fc retention), the config then targets the decoder
      linears only, and fc goes into the ignore list
   4. the froggeric/Qwen-Fixed-Chat-Templates template (v22.5) replaces
-     the repo's stock one, like build_fast_model.py does
+     the repo's chat_template.jinja, like build_fast_model.py does
+
+The repo's QUANTIZATION_MANIFEST.json / UPLOAD_MANIFEST.json /
+quantization_config.json / README.md / media files serve no purpose in an
+installed dir (and the quant-config dups would contradict the build's own
+config rewrite), so they are left out of the destination; the rest (the
+licenses, the tokenizer's vocab/merges) is hard-linked like every other
+file.
 
 The GPTQ-calibrated int4 upgrades and the 40k MTP draft head (with its
 draft-vocab ids) are deliberately NOT built here: they need the upstream
@@ -41,7 +66,8 @@ recipe runs the native full-vocab head, and the dflash2/dspark drafters
 -- trained on the base model -- may show reduced acceptance; measure
 before trusting them.
 
-~8 GB peak RAM, a few minutes on a desktop CPU.
+~8 GB peak RAM; a full build is tens of minutes of disk traffic on a
+desktop CPU, mostly the conversion pass over the five shards.
 
 Usage:  python prepare/build_swift_model.py DEST_DIR
 
@@ -60,12 +86,13 @@ import time
 import torch
 from compressed_tensors.compressors.pack_quantized.base import pack_to_int32
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import GatedRepoError
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 import _ui as ui
 
-REPO = "jamesbrunet/Swift-Qwen3.8-27b-W4A16-AutoRound"
+REPO = "ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound"
 TEMPLATE_REPO = "froggeric/Qwen-Fixed-Chat-Templates"
 TEMPLATE_FILE = "chat_template.jinja"
 
@@ -82,9 +109,44 @@ META = (
     "generation_config.json",
 )
 
+# repo extras that serve no purpose in an installed dir; the manifests and
+# the standalone quantization config would also contradict the build's own
+# rewrites, so they are left out of the destination
+SKIP = (
+    "QUANTIZATION_MANIFEST.json",
+    "UPLOAD_MANIFEST.json",
+    "quantization_config.json",
+    "README.md",
+    "swift-1.5-planet-demo.mp4",
+    "ukisai-banner.png",
+)
+
 GROUP, BITS, QMAX = 128, 8, 127
 _BAR_MIN = 8 << 20
 
+# the compressed-tensors group_0 the config rewrite starts from: the
+# published quant's 4-bit symmetric group-128 Linear in the exact
+# pack-quantized shape vLLM loads (the old repo's proven config)
+CT_GROUP_0 = {
+    "format": "pack-quantized",
+    "input_activations": None,
+    "output_activations": None,
+    "targets": ["Linear"],
+    "weights": {
+        "actorder": None,
+        "block_structure": None,
+        "dynamic": False,
+        "group_size": 128,
+        "num_bits": 4,
+        "observer": "memoryless_minmax",
+        "observer_kwargs": {},
+        "scale_dtype": None,
+        "strategy": "group",
+        "symmetric": True,
+        "type": "int",
+        "zp_dtype": None,
+    },
+}
 # the MTP module's bf16 linears (upstream prepare/quant_mtp.py list); the
 # norms and pre_fc norms in the same file stay bf16
 MTP_LINEARS = (
@@ -233,6 +295,43 @@ def requant_mtp(path):
     return keep_fc
 
 
+def _convert_stem(tensors, stem):
+    """One published AutoRound linear -> the compressed-tensors
+    pack-quantized trio. GPTQ packs the 4-bit weights along the
+    in-feature dim (qweight rows: [in/8, out]); the trio transposes them
+    to [out, in/8], and the scales follow the same transpose (staying
+    fp16, like the checkpoint's linears). The export is symmetric, so
+    every qzeros nibble is the all-midpoint pack 0x88888888 -- anything
+    else is an asymmetric zero-point this shape cannot represent."""
+    qw = tensors.pop(stem + ".qweight")
+    qz = tensors.pop(stem + ".qzeros")
+    sc = tensors.pop(stem + ".scales")
+    if (qz != 0x88888888).any():
+        ui.fail(f"{stem}: qzeros carry a non-midpoint zero-point -- the build "
+                "converts the symmetric shape only (all-midpoint 0x88888888)")
+    if sc.shape != (qw.shape[0] // 16, qw.shape[1]):
+        ui.fail(f"{stem}: scales {tuple(sc.shape)} do not match "
+                f"qweight {tuple(qw.shape)}")
+    packed, out = qw.shape
+    tensors[stem + ".weight_packed"] = qw.t().contiguous()
+    tensors[stem + ".weight_scale"] = sc.t().contiguous()
+    tensors[stem + ".weight_shape"] = torch.tensor([out, packed * 8], dtype=torch.int64)
+
+
+def convert_autoround(path, stems):
+    """The AutoRound tensors of every quantized linear in one shard, in
+    place (the format vLLM cannot load, to the pack-quantized shape it
+    can)."""
+    tensors = {}
+    with safe_open(path, framework="pt") as f:
+        meta = f.metadata()
+        for k in f.keys():
+            tensors[k] = f.get_tensor(k)
+    for stem in stems:
+        _convert_stem(tensors, stem)
+    _commit(tensors, meta, path)
+
+
 def file_ready(dst_path, src_path):
     return os.path.isfile(dst_path) and os.path.getsize(dst_path) == os.path.getsize(src_path)
 
@@ -362,6 +461,11 @@ def main():
         pass  # offline + cold cache: the snapshot below raises its own error
     try:
         hub = _snapshot(progress=p, require=require)
+    except GatedRepoError:
+        p.finish(False, f"Fetching {REPO} refused: the repo is gated",
+                 f"accept the Swift Open License once on https://huggingface.co/{REPO}, "
+                 "and set HF_TOKEN in the environment for the download",
+                 fatal=True)
     except Exception as e:
         p.finish(False, f"Fetching {REPO} failed ({e!r})",
                  "check the network and Hugging Face reachability; once cached, re-runs are offline",
@@ -378,13 +482,36 @@ def main():
                 "This script assumes the published layout (one extra-tensors file); check the repo")
     mtp_file = mtp_files.pop()
 
-    # the files this script rewrites get copied (never linked: in-place
+    # every quantized linear of the published AutoRound export (its
+    # qweight keys), grouped by the shard it lives in
+    qw_stems = sorted({k[: -len(".qweight")] for k in wm if k.endswith(".qweight")})
+    if not qw_stems:
+        ui.fail("the index carries no .qweight tensors",
+                "this build expects the published AutoRound export; check the repo")
+    conv_files = {}
+    for stem in qw_stems:
+        conv_files.setdefault(wm[stem + ".qweight"], []).append(stem)
+    # the published quant's ignore set, derived from the index: the bf16
+    # linears group_0 ("Linear") must not claim -- every visual linear and
+    # the linear-attention in_proj_a/b (the norms, the embeddings and the
+    # conv are not nn.Linear; in_proj_qkv/in_proj_z are quantized, so they
+    # are not ignored)
+    vis_linears = ("attn.qkv", "attn.proj", "mlp.linear_fc1", "mlp.linear_fc2",
+                   "merger.linear_fc1", "merger.linear_fc2")
+    plain = {k[: -len(".weight")] for k in wm if k.endswith(".weight")}
+    ignore = sorted(
+        s for s in plain
+        if s.startswith("model.visual.") and s.endswith(vis_linears)
+        or s.endswith("in_proj_a") or s.endswith("in_proj_b"))
+
+    # the files this script rewrites get copied (never link: in-place
     # edits must not write through into the shared HF cache), the rest
     # hard-links -- including index and config, which the steps below
     # rewrite (open(dst, "w") would otherwise truncate the cache's copy
     # through the link)
     rewrite = {wm[embed_key], wm[LM_KEY], mtp_file,
                "model.safetensors.index.json", "config.json"}
+    rewrite |= set(conv_files)
 
     if complete(dst) and template_ready(dst, tsrc):
         ui.done(f"Swift W4A16 already complete: {dst} ({ui.dur(time.monotonic() - t0)})")
@@ -392,7 +519,7 @@ def main():
 
     ui.stage(f"Assembling {dst}")
     for f in sorted(os.listdir(hub)):
-        if f in (".gitattributes",) or (f == TEMPLATE_FILE and tsrc is not None):
+        if f in (".gitattributes",) or f in SKIP or (f == TEMPLATE_FILE and tsrc is not None):
             continue
         src = os.path.realpath(os.path.join(hub, f))
         if f in rewrite:
@@ -424,6 +551,13 @@ def main():
                 shutil.copy(src, dstp)
                 ui.ok(f"Copied {f} ({ui.human(size)})")
 
+    # the conversion pass: the published AutoRound (GPTQ-packed) tensors
+    # -> the compressed-tensors pack-quantized shape vLLM loads
+    t_c = time.monotonic()
+    for f, stems in sorted(conv_files.items()):
+        convert_autoround(os.path.join(dst, f), stems)
+    ui.ok(f"Converted {len(qw_stems)} AutoRound linears to pack-quantized in {ui.dur(time.monotonic() - t_c)}")
+
     # the three local steps (round-to-nearest int8, in the copied files)
     t_q = time.monotonic()
     requant(os.path.join(dst, wm[LM_KEY]), LM_KEY, torch.float16)
@@ -441,14 +575,32 @@ def main():
         del wm[key]
         for s in ("weight_packed", "weight_scale", "weight_shape"):
             wm[stem + "." + s] = shard
+    for stem in qw_stems:
+        shard = wm[stem + ".qweight"]
+        for s in ("qweight", "qzeros", "scales"):
+            del wm[stem + "." + s]
+        for s in ("weight_packed", "weight_scale", "weight_shape"):
+            wm[stem + "." + s] = shard
     with open(os.path.join(dst, "model.safetensors.index.json"), "w") as f:
         json.dump(hub_idx, f, indent=2)
 
-    # config: clone group_0 (4-bit Linear) into the three specific groups
-    # (8-bit), and drop lm_head from the ignore list (upstream's scripts).
-    # A kept-bf16 mtp.fc goes into the ignore list, and group_3 targets
-    # the decoder linears only (upstream's --keep-fc shape).
+    # config: the published auto-round config is not loadable by vLLM, so
+    # it is replaced wholesale by the compressed-tensors pack-quantized
+    # shape (the old repo's proven group_0, the ignore list derived from
+    # the index above), then cloned into the three specific groups
+    # (8-bit), and lm_head dropped from the ignore list (upstream's
+    # scripts). A kept-bf16 mtp.fc goes into the ignore list, and group_3
+    # targets the decoder linears only (upstream's --keep-fc shape).
     cfg = json.load(open(os.path.join(dst, "config.json")))
+    cfg["quantization_config"] = {
+        "config_groups": {"group_0": copy.deepcopy(CT_GROUP_0)},
+        "format": "pack-quantized",
+        "global_compression_ratio": None,
+        "ignore": list(ignore),
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed",
+    }
     qc = cfg["quantization_config"]
     qc["ignore"] = [i for i in qc.get("ignore") or [] if i != "lm_head"]
     if keep_fc and "mtp.fc" not in qc["ignore"]:

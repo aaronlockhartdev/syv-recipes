@@ -191,7 +191,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python prepare/fetch_dflash2.py        models/Qwen3.8-27B-DFlash2-W4A16
 # optional: the DSpark drafter (for recipes/w4a16-int8-dspark.sh)
 .venv/bin/python prepare/fetch_dspark.py          models/Qwen3.8-27B-DSpark
-# optional: the ukisai Swift variant, W4A16 (~20 GB; see the Notes bullet)
+# optional: the ukisai Swift 1.5 variant, W4A16 (~19.6 GB, gated; see the Notes bullet)
 .venv/bin/python prepare/build_swift_model.py     models/Qwen3.8-27B-Swift-W4A16
 ```
 
@@ -437,27 +437,32 @@ n-gram chains are in the set (both off by default).
   perplexity/GSM8K against w4a16-int8-dflash2 before trusting it.
   `./setup.py` (or the container's w4a16-int8-dspark arm) fetches the
   checkpoint by default (`DSPARK=/path` redirects, `=0` skips it).
-- **The ukisai Swift variant (opt-in: `SWIFT=1` in setup, prepare, and every recipe; `SWIFT=/dir` redirects)**: ukisai/Swift-Qwen3.8-27b is a reasoning-efficiency fine-tune
-  of the base model -- their headline is ~58% fewer thinking tokens at <1%
-  accuracy cost on their benches (served bf16 on big boxes).
-  `jamesbrunet/Swift-Qwen3.8-27b-W4A16-AutoRound` (ungated, ~20 GB) is its
-  W4A16 AutoRound quant, and `prepare/build_swift_model.py` turns it into a
-  servable dir with the same operations the fast model gets -- round-to-
-  nearest int8 group-128 for `lm_head` (~1.3 GB freed), `embed_tokens`
-  (~1.3 GB) and the MTP module (~0.4 GB; the published config would
-  otherwise refuse any speculative load) -- plus the froggeric template; one
-  CPU pass, ~8 GB RAM. What it is *not* yet: the GPTQ-calibrated int4 heads
-  and the 40k MTP draft head need the upstream drafter/ training pipeline
-  run against this fine-tune (deferred) -- until then the MTP recipe runs
-  the native full-vocab head, and the dflash2/dspark drafters (trained on
-  the base model) are unmeasured on it: compare acceptance against the base
-  before trusting them. UkisAI's Swift Open License v1.0 (free up to $1M
-  revenue, enterprise above) is restrictive, so the dir is fetched and
-  built, never committed. Serve:
+- **The ukisai Swift variant (opt-in: `SWIFT=1` in setup, prepare, and every recipe; `SWIFT=/dir` redirects)**: ukisai/Swift-1.5-Qwen3.8-27b is a reasoning-efficiency fine-tune
+  of the base model -- 58.5% fewer thinking tokens, +0.35% vs the base
+  (a 9.18x speed-up claim on ukisai's benches; served bf16 on big boxes).
+  The build source is ukisai's own W4A16 AutoRound quant of it
+  (`ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound`, ~19.6 GB over 5
+  shards, GATED), and `prepare/build_swift_model.py` turns it into a
+  servable dir: first it converts the native AutoRound export (GPTQ-packed
+  qweight/scales, `quant_method: auto-round`, which vLLM cannot load) to
+  the compressed-tensors pack-quantized shape, then applies the same
+  operations the fast model gets -- round-to-nearest int8 group-128 for
+  `lm_head` (~1.3 GB freed), `embed_tokens` (~1.3 GB) and the MTP module
+  (~0.4 GB; the published config would otherwise refuse any speculative
+  load) -- plus the froggeric template; one CPU pass, ~8 GB RAM. The
+  download is gated: accept UkisAI's Swift Open License once on the HF
+  page, and keep `HF_TOKEN` in the environment for the fetch. What it is
+  *not* yet: the GPTQ-calibrated int4 heads and the 40k MTP draft head
+  need the upstream drafter/ training pipeline run against this fine-tune
+  (deferred) -- until then the MTP recipe runs the native full-vocab
+  head, and the dflash2/dspark drafters (trained on the base model) are
+  unmeasured on it: compare acceptance against the base before trusting
+  them. The Swift Open License (free up to $1M revenue, enterprise above)
+  is restrictive, so the dir is fetched and built, never committed. Serve:
   `SWIFT=1 bash recipes/w4a16-int8-mtp.sh` (any recipe loads the dir;
-  `SWIFT_MODEL=/dir` points at a differently-placed dir). Do not put the Swift
-  dir in `MODEL` -- `setup.py` builds the fast model into `$MODEL` and would
-  clobber it.
+  `SWIFT_MODEL=/dir` points at a differently-placed dir). Do not put the
+  Swift dir in `MODEL` -- `setup.py` builds the fast model into `$MODEL`
+  and would clobber it.
 - **Multi-turn prefix caching**: `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS`
   (on by default in the recipes — the patch ships it off; set it to 0
   to opt out) keeps the mamba state snapshots a conversation's hits

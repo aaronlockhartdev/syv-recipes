@@ -94,11 +94,7 @@ combination is new to the matrix).
   dspark.py/dflash.py so the installed dir stays self-contained; an
   interrupted (partial) cache is completed, never treated as warm.
 
-- **The Swift variant is opt-in** (`SWIFT=1` in setup/prepare and in every recipe; `SWIFT=/path` redirects): `prepare/build_swift_model.py` applies the fast model's
-  round-to-nearest operations (int8 group-128 lm_head/embed_tokens/MTP
-  module, froggeric template) to jamesbrunet's W4A16-AutoRound quant of
-  the ukisai reasoning-efficiency fine-tune (~58% fewer thinking tokens
-  at <1% accuracy on their benches). A truthy `SWIFT` makes the recipes
+- **The Swift variant is opt-in** (`SWIFT=1` in setup/prepare and in every recipe; `SWIFT=/path` redirects): `prepare/build_swift_model.py` builds the variant from ukisai's own W4A16-AutoRound quant of the Swift 1.5 reasoning-efficiency fine-tune (58.5% fewer thinking tokens, +0.35% vs base on ukisai's benches). The repo publishes a native AutoRound export (GPTQ-packed qweight/qzeros/scales, `quant_method: auto-round`), which vLLM cannot load -- the build converts every quantized linear to the compressed-tensors pack-quantized shape (qweight transposed to weight_packed, scales to weight_scale, qzeros verified all-midpoint and dropped, weight_shape added; config rewritten to the compressed-tensors shape with the ignore list derived from the index: the bf16 visual linears and in_proj_a/b), then applies the fast model's round-to-nearest operations (int8 group-128 lm_head/embed_tokens/MTP module, froggeric template). The repo is GATED: accept the Swift Open License once on the HF page, HF_TOKEN in the environment for the download. A truthy `SWIFT` makes the recipes
   serve the variant: `MODEL` becomes `${SWIFT_MODEL:-<the build destination>}`
   (SWIFT wins over MODEL; never point MODEL at the Swift dir — setup.py
   builds the fast model into $MODEL). The GPTQ int4 upgrades and the 40k
