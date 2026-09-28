@@ -55,6 +55,7 @@ tokenize-v1-route.patch
 marlin-int8-asym-zp.patch
 compile-key-runtime-knobs.patch
 auth-deny-default.patch
+spec-attn-smem-fit.patch
 kvarn-0.29.0.patch
 kvarn-files-0.29.0.patch
 kvarn-v2-runner-0.29.0.patch

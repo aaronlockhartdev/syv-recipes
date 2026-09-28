@@ -81,7 +81,7 @@ from compressed_tensors.compressors.pack_quantized.base import pack_to_int32
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import GatedRepoError
 from safetensors import safe_open
-from safetensors.torch import save_file
+from atomic_publish import save_tensors
 
 import _ui as ui
 
@@ -232,10 +232,10 @@ def _packed_into(tensors, key, q, scale, scale_dtype):
 
 
 def _commit(tensors, meta, path):
-    """Write the tensor dict through temp file + rename: a crash mid-write
-    must never leave a half-written file with a valid header behind."""
-    save_file(tensors, path + ".tmp", metadata=meta or {"format": "pt"})
-    os.replace(path + ".tmp", path)
+    """Write the tensor dict through temp file + fsync + rename (atomic_publish,
+    #195): a crash mid-write must never leave a half-written file with a valid
+    header behind."""
+    save_tensors(tensors, path, meta or {"format": "pt"})
 
 
 def requant(path, key, scale_dtype):

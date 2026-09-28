@@ -35,7 +35,7 @@ import torch
 from compressed_tensors.compressors.pack_quantized.base import pack_to_int32
 from huggingface_hub import hf_hub_download
 from safetensors import safe_open
-from safetensors.torch import save_file
+from atomic_publish import save_tensors
 import _ui as ui
 
 BASE_REPO = "dbirks/Qwen3.8-27B-W4A16-AutoRound"
@@ -129,10 +129,9 @@ def requant_embed(path, key):
     # the embedding path creates scales in params_dtype (bf16), unlike the linears
     tensors[stem + ".weight_scale"] = scale.squeeze(-1).to(torch.bfloat16).contiguous()
     tensors[stem + ".weight_shape"] = torch.tensor([out_f, in_f], dtype=torch.int64)
-    # temp file + rename: a crash mid-write must never leave a half-written
-    # shard with a valid header behind
-    save_file(tensors, path + ".tmp", metadata=meta or {"format": "pt"})
-    os.replace(path + ".tmp", path)
+    # temp file + fsync + rename (atomic_publish, #195): a crash mid-write
+    # must never leave a half-written shard with a valid header behind
+    save_tensors(tensors, path, meta or {"format": "pt"})
 
 
 def file_ready(dst_path, src_path):

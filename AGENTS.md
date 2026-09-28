@@ -38,7 +38,7 @@ combination is new to the matrix).
 
 ## Invariants
 
-- **`patches/` is the synced set (43).** They apply in the order of
+- **`patches/` is the synced set (44).** They apply in the order of
   `patches/series` (the upstream file; later patches depend on files and
   hunk context created by earlier ones -- e.g. prefill-attn-int8 carries
   spec-decode-attn's lines as context), not in glob order.
@@ -154,8 +154,8 @@ combination is new to the matrix).
 Dockerfile  requirements.txt  setup.py  README.md
 docker/  entrypoint.sh, prepare.sh
 recipes/ the nine *.sh
-prepare/ build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, harden_chat_template.py, patch_vllm.py, _ui.py
-patches/ the 43 synced patches + patches/series (the apply order)
+prepare/ atomic_publish.py, build_fast_model.py, build_swift_model.py, fetch_dflash2.py, fetch_dspark.py, harden_chat_template.py, patch_vllm.py, _ui.py
+patches/ the 44 synced patches + patches/series (the apply order)
 ```
 
 Defaults: venv `.venv/`, models under `models/`, port 8080, and `Qwen3.8-

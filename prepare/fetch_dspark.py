@@ -28,6 +28,7 @@ import shutil
 import sys
 import time
 
+from atomic_publish import write_text
 import _ui as ui
 
 REPO = "RadixArk/Qwen3.8-27B-DSpark"
@@ -71,9 +72,9 @@ def _install_config(hub, dst):
         with open(dstp) as f:
             if f.read() == text:
                 return False
-        os.remove(dstp)
-    with open(dstp, "w") as f:
-        f.write(text)
+    # Atomic (a temp file and a rename, #195): a truncated config.json
+    # would stay broken on every later run
+    write_text(dstp, text)
     if src_archs == [_PUBLISHED_ARCH]:
         ui.ok(f"Wrote config.json (architecture {_PUBLISHED_ARCH} -> {_QWEN3_ARCH})")
     else:

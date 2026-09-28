@@ -245,6 +245,7 @@ profiles CUDA-graph memory itself), so the recipes no longer export it.
 - `sampler-small-topk-fast-softmax.patch` — sort-free top-k/top-p, multi-block softmax, truncated drafts
 - `serve-404-served-names.patch` — the model-not-found 404 now lists the served names (upstream #166)
 - `serve-model-path-match.patch` — accept the model path `/v1/models` itself advertises, not just the served name (upstream #167)
+- `spec-attn-smem-fit.patch` — the split-KV verify attention launches on Turing (sm75, 64 KB of shared memory per block): on Triton's OutOfResources it halves the KV tile, retries, and remembers the tile that launched per (device, BLOCK_M, head size, cache dtype); wherever the old tile launches nothing changes (upstream #188, measured on a Quadro RTX 6000; re-cut for this series -- upstream's hunk context carries the fp8-KV lane we do not ship)
 - `spec-decode-attn.patch` — split-KV verify attention (`VLLM_SPEC_DECODE_ATTN`), bf16 path
 - `spec-decode-int4-kv-mq3d.patch` — multi-query 3D dispatch for the int4-KV verify (`VLLM_INT4_MQ_3D`; both int4 recipes)
 - `spec-decode-int8-kv.patch` — teaches the split-KV kernel to read the int8 per-token-head cache
@@ -399,6 +400,42 @@ n-gram chains are in the set (both off by default).
   (gotchas content unchanged); the `upstream` remote still names the old
   repo, which GitHub redirects. Their verify.sh / quant_heads_stream fixes
   target their own harness/scripts, not adopted.
+- **Upstream sync 1cf8665..fa933b7** (this sync): adopted
+  `spec-attn-smem-fit.patch` (upstream #188) -- the 44th patch, re-cut for
+  this series (upstream's hunk context carries the fp8-KV lane we do not ship;
+  the change itself is upstream's verbatim): the split-KV verify attention now
+  catches Triton's OutOfResources, halves
+  the KV tile, retries, and remembers the tile that launched per
+  (device, BLOCK_M, head size, cache dtype), so it launches on Turing
+  cards (sm75, 64 KB of shared memory per block) that the 98,304-byte
+  tile overflowed; wherever the old tile launches -- every card it was
+  written for, including our sm86 3090s -- nothing changes and nothing
+  is retried. Upstream measured it on a Quadro RTX 6000 (sm75, 24 GB,
+  float16, int8 KV, SPEC=off): without the patch the server dies at
+  warm-up, with it it starts (55,680 KV tokens) and decodes 31.6 tok/s
+  at one stream and 104.4 aggregate at four. Also adopted the #195
+  crash-safety protocol for the prepare scripts (upstream #195, PRs
+  #198-#203): new `prepare/atomic_publish.py` (a temp file, an fsync, a
+  rename; the first backup kept pristine; the safetensors index last, as
+  the commit point), and `harden_chat_template.py`,
+  `build_fast_model.py`, `build_swift_model.py` and `fetch_dspark.py`
+  now write through it -- a killed run leaves the old file behind, and
+  the next run completes it. Their #197 fix (the int8 head groups
+  declare symmetric weights whatever the body group does) needs no
+  port: our builders declare `symmetric: true` / `zp_dtype: null`
+  explicitly. Not adopted: their bench/test_prepare_crash.py
+  crash-injection harness (bench/ is theirs) and the #195 rewrites of
+  scripts this repo does not ship (quant_*, build_draft_vocab,
+  fetch_fast_variant). Two 2x3090 field-report data points (upstream
+  #215 -- their measurements, not ours): #163 -- a 2x3090 PCIe x8 box
+  (no NVLink) with a community-patched P2P driver ran vLLM's custom
+  all-reduce at +6.5-7.2% C1 greedy over NCCL, and a fragmentation
+  soak found `expandable_segments:False` costs nothing measurable (both
+  allocator settings fail the same way at 0.97); #208 -- at 32 streams
+  of 32K each, DFlash2 k=3 (a 2048-token block) read 130.6 tok/s at 92%
+  cached with a coarser `--prefix-cache-retention-interval` (12 blocks,
+  24576) against the default's (6 blocks, 12288) 116.4 at 90%, so under
+  heavy concurrency of long prompts a coarser interval can pay.
 - **`draft_sample_method` is required on 0.29.0** (upstream #73): the
   native speculator base allocates the draft-logits buffer only when the
   speculative config asks for it; without it the rejection test loses its
